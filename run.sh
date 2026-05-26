@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Driver for the s390x single-node Sunbeam reproducer.
+# Usage:
+#   ./run.sh all          # run all phases in order
+#   ./run.sh 03           # run only phase 03 (prefix-match against script filenames)
+#   ./run.sh --run-id <id> all   # resume into an existing artifacts/<id>/ dir
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export REPO_ROOT
+
+# -------- parse args --------
+RUN_ID=""
+PHASE_ARG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --run-id) RUN_ID="$2"; shift 2 ;;
+        --help|-h)
+            sed -n '2,8p' "$0"
+            exit 0
+            ;;
+        *) PHASE_ARG="$1"; shift ;;
+    esac
+done
+
+if [[ -z "${PHASE_ARG}" ]]; then
+    echo "usage: $0 [--run-id <id>] {all|<phase-prefix>}" >&2
+    exit 2
+fi
+
+if [[ -z "${RUN_ID}" ]]; then
+    RUN_ID=$(date -u +%Y%m%dT%H%M%SZ)
+fi
+export RUN_ID
+
+ARTIFACT_DIR="${REPO_ROOT}/artifacts/${RUN_ID}"
+mkdir -p "${ARTIFACT_DIR}/.status"
+export ARTIFACT_DIR
+
+echo "run_id=${RUN_ID}"
+echo "artifact_dir=${ARTIFACT_DIR}"
+
+# -------- phase dispatch --------
+shopt -s nullglob
+all_phases=("${REPO_ROOT}"/scripts/[0-9][0-9]_*.sh)
+
+select_phases=()
+if [[ "${PHASE_ARG}" == "all" ]]; then
+    select_phases=("${all_phases[@]}")
+else
+    for p in "${all_phases[@]}"; do
+        base=$(basename "$p")
+        if [[ "${base}" == "${PHASE_ARG}"* ]] || [[ "${base%.sh}" == "${PHASE_ARG}" ]]; then
+            select_phases+=("$p")
+        fi
+    done
+fi
+
+if (( ${#select_phases[@]} == 0 )); then
+    echo "no matching phase for '${PHASE_ARG}'. Available:" >&2
+    for p in "${all_phases[@]}"; do echo "  $(basename "$p")" >&2; done
+    exit 2
+fi
+
+# Phase 05 (capture) is special: if we're running 'all' and any earlier phase
+# fails, we still want to run 05 + 99 for the post-mortem.
+overall_rc=0
+for script in "${select_phases[@]}"; do
+    base=$(basename "$script")
+    echo "================================================================"
+    echo ">>> ${base}"
+    echo "================================================================"
+    rc=0
+    bash "$script" || rc=$?
+    if (( rc != 0 )); then
+        overall_rc="${rc}"
+        echo "!!! ${base} returned ${rc}"
+        # For 'all', continue into capture+collect so we still get artifacts.
+        if [[ "${PHASE_ARG}" == "all" ]]; then
+            case "${base}" in
+                05_capture_state.sh|99_collect_artifacts.sh) continue ;;
+                *) echo "continuing to 05/99 for post-mortem capture" ;;
+            esac
+        else
+            exit "${rc}"
+        fi
+    fi
+done
+
+exit "${overall_rc}"

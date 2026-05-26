@@ -1,0 +1,4 @@
+artifacts/
+*.tar.zst
+*.swp
+.DS_Store
