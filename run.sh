@@ -41,8 +41,13 @@ echo "run_id=${RUN_ID}"
 echo "artifact_dir=${ARTIFACT_DIR}"
 
 # -------- phase dispatch --------
+# Glob: any script starting with two digits. Force LC_ALL=C sort so `02_*`
+# precedes `02b_*` -- some locales treat `_` as a non-letter and would reverse
+# the order, which would run phase 02b before phase 02.
 shopt -s nullglob
-all_phases=("${REPO_ROOT}"/scripts/[0-9][0-9]_*.sh)
+mapfile -t all_phases < <(
+    LC_ALL=C ls "${REPO_ROOT}"/scripts/[0-9][0-9]*.sh 2>/dev/null
+)
 
 select_phases=()
 if [[ "${PHASE_ARG}" == "all" ]]; then

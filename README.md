@@ -9,6 +9,15 @@ record what worked and what didn't (including which snaps/OCI images have no
 s390x build), and produce a tarball of artifacts whether or not the deployment
 fully succeeds.
 
+> **Realistic outcome:** Canonical K8s on s390x is not officially validated, and
+> the OpenStack charm OCI images at `ghcr.io/canonical/...` are published from a
+> pipeline that does not currently build z/power images. So the headline
+> deliverable of a run is most often a precise per-image arch-availability
+> report (`arch_report.md`) listing exactly what needs to be built or sourced
+> from upstream before Sunbeam-on-s390x is viable. Tempest is best-effort
+> downstream of that. See [K8s s390x prerequisites](#k8s-s390x-prerequisites)
+> below for the workaround we use to get K8s itself up.
+
 ## Prerequisites
 
 - Ubuntu 26.04 LTS (Resolute) on s390x
@@ -45,6 +54,7 @@ re-run unless you delete the sentinel.
 | 00 | `00_check_host.sh`              | Assert s390x + 26.04, dump env/network/KVM facts                           |
 | 01 | `01_install_prereqs.sh`         | `snap install openstack`, s390x arch check for all required snaps          |
 | 02 | `02_prepare_node.sh`            | Run `sunbeam prepare-node-script`, re-check installed snap archs           |
+| 02b| `02b_setup_s390x_cni.sh`        | Bootstrap K8s (cilium disabled), apply Calico, rewrite addon images        |
 | 03 | `03_bootstrap.sh`               | `sunbeam cluster bootstrap` with the 2026.1 manifest (core only)           |
 | 04 | `04_configure.sh`               | `sunbeam configure --accept-defaults`                                      |
 | 05 | `05_capture_state.sh`           | `juju export bundle`, `juju status`, k8s dump, OCI s390x check (always 0)  |
@@ -67,6 +77,14 @@ always get a post-mortem tarball.
   → s390x manifest entry yes/no per image
 - [tools/extract_oci_images.sh](tools/extract_oci_images.sh) — scrape image
   refs from the exported juju bundle
+- [tools/refresh_pe_ibm.sh](tools/refresh_pe_ibm.sh) — re-vendor the calico
+  manifest and coredns rewrite script from
+  [canonical/pe-ibm-microk8s-validation](https://github.com/canonical/pe-ibm-microk8s-validation)
+  (branch `c-k8s-and-calico-experimental`)
+- [tools/rewrite_k8s_addon_images.sh](tools/rewrite_k8s_addon_images.sh) —
+  patch a K8s addon's `ghcr.io/canonical/...` images to upstream registries
+- [vendor/pe-ibm/](vendor/pe-ibm/) — pinned snapshot of the pe-ibm files used
+  by phase 02b
 
 ## Artifact bundle contents
 
@@ -93,6 +111,53 @@ sudo rm -rf /var/snap/openstack* /var/snap/k8s* ~/snap/openstack
 ```
 
 Then start fresh: `./run.sh all`.
+
+## K8s s390x prerequisites
+
+The Canonical K8s snap does not work out-of-the-box on s390x — its default CNI
+(cilium) has no z/power build, and several of its bundled addon images at
+`ghcr.io/canonical/...` are also not published for s390x. The Performance
+Engineering / IBM Z alliances team has a working recipe captured in the
+[canonical/pe-ibm-microk8s-validation](https://github.com/canonical/pe-ibm-microk8s-validation)
+repo on branch `c-k8s-and-calico-experimental`.
+
+Phase 02b encodes that recipe:
+
+1. `sudo k8s bootstrap --file <cfg>` with `network.enabled: false` so cilium
+   doesn't get installed.
+2. `sudo k8s kubectl apply -f vendor/pe-ibm/calico.yaml` — the *patched* Calico
+   manifest from pe-ibm (do not substitute upstream Calico; it needs the
+   pe-ibm tweaks for the K8s snap's IPAM expectations).
+3. `sudo k8s enable <addon>` for each addon Sunbeam needs (dns, local-storage,
+   load-balancer at a minimum), followed by `tools/rewrite_k8s_addon_images.sh`
+   which swaps each `ghcr.io/canonical/<x>` image to its upstream equivalent
+   (e.g. `registry.k8s.io/coredns/coredns:v1.11.3`). The mapping table lives
+   inside `tools/rewrite_k8s_addon_images.sh` — extend it as you find correct
+   upstream images for additional addons.
+4. A smoke pod (`kubectl run s390x-smoke --image=ubuntu ...`) confirms pod
+   scheduling, image pull, and pod networking all work on this LPAR.
+
+### Vendoring workflow
+
+Before the first run, populate `vendor/pe-ibm/` from upstream:
+
+```bash
+./tools/refresh_pe_ibm.sh
+```
+
+This clones the upstream branch, copies `calico.yaml` and the coredns rewrite
+script into `vendor/pe-ibm/`, and pins the commit SHA in `vendor/pe-ibm/COMMIT`.
+Re-run when you want to pick up upstream changes; review the resulting `git
+diff` before committing.
+
+### Sunbeam ↔ pre-bootstrapped K8s
+
+Phase 03 (`sunbeam cluster bootstrap`) may or may not gracefully detect the
+K8s cluster 02b leaves behind. If it tries to re-bootstrap and fails, see the
+comment block in [`manifests/sunbeam-2026.1-s390x.yaml`](manifests/sunbeam-2026.1-s390x.yaml)
+for the mitigations to try in order. Whatever happens, record the exact error
+in the phase log — that finding itself is valuable feedback to the Sunbeam
+upstream team.
 
 ## Tempest scoping
 

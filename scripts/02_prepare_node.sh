@@ -53,3 +53,4 @@ fi
 
 phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"
+log "NEXT: run phase 02b (./run.sh 02b) to bootstrap k8s with Calico before phase 03. The default cilium CNI does not run on s390x."

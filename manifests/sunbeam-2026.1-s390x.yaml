@@ -20,6 +20,19 @@
 # ubuntu@24.04 revisions at the time of writing. Phase 03 will surface that
 # as a bootstrap failure; the arch_report.md from phases 01/05 will tell you
 # which charms have a 26.04 revision and which don't.
+#
+# NOTE on K8s bootstrap: this manifest assumes Canonical K8s has ALREADY been
+# bootstrapped by phase 02b (scripts/02b_setup_s390x_cni.sh), which disables
+# cilium and installs Calico because cilium does not run on s390x. If Sunbeam
+# 2026.1 insists on running its own `k8s bootstrap` and refuses to use the
+# existing one, you'll see phase 03 fail with a "k8s already bootstrapped"
+# or "node not ready" error. Mitigations in order of preference:
+#   1. Look for a `software.k8s.bootstrap: false` or equivalent manifest key
+#      in `sunbeam manifest generate` output and add it here.
+#   2. Patch the Sunbeam Terraform plan that runs k8s bootstrap (see
+#      $SNAP_DATA/openstack/terraform/... after the snap is installed) to
+#      skip the bootstrap step.
+#   3. File an issue against openstack-snap upstream.
 
 deployment:
   bootstrap:
