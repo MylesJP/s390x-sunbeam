@@ -26,11 +26,16 @@ git clone --depth 1 --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_REPO}" "${workdir}
 commit=$(git -C "${workdir}/src" rev-parse HEAD)
 echo ">>> upstream commit: ${commit}"
 
-# Files we vendor. Paths inside the upstream repo are best-effort: if they
-# move, edit this list and report back so the README references are corrected.
+# Files we vendor. Upstream is a flat layout at the repo root.
+# Mapping is: <vendored-name>=<upstream-path>.
 declare -A files=(
     [calico.yaml]="calico.yaml"
-    [rewrite-coredns.sh]="scripts/rewrite-coredns.sh"
+    [k8s-bootstrap.yaml]="k8s-bootstrap.yaml"
+    [15-build-cluster-calico.sh]="15-build-cluster-calico.sh"
+    [20-enable-dns.sh]="20-enable-dns.sh"
+    [40-test-basic-workloads.sh]="40-test-basic-workloads.sh"
+    [minimal-nginx-v2-no-storage.yaml]="minimal-nginx-v2-no-storage.yaml"
+    [static-nginx-three-node-lb.yaml]="static-nginx-three-node-lb.yaml"
 )
 
 missing=()

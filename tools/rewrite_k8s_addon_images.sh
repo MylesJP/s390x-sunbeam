@@ -16,10 +16,11 @@ source "${SCRIPT_DIR}/lib.sh"
 
 addon="${1:?addon name required, e.g. coredns, metrics-server, local-storage}"
 
-# Mapping: ghcr.io/canonical/<X> -> upstream replacement
-# Update as we learn each addon's correct upstream image + tag.
+# Mapping: ghcr.io/canonical/<X> -> upstream replacement.
+# coredns tag matches what the PE-IBM team uses in vendor/pe-ibm/20-enable-dns.sh.
+# Update other addons as we learn each one's correct upstream image + tag.
 declare -A IMAGE_MAP=(
-    ["ghcr.io/canonical/coredns"]="registry.k8s.io/coredns/coredns:v1.11.3"
+    ["ghcr.io/canonical/coredns"]="docker.io/coredns/coredns:1.12.1"
     ["ghcr.io/canonical/metrics-server"]="registry.k8s.io/metrics-server/metrics-server:v0.7.2"
     # Add as discovered:
     #   ["ghcr.io/canonical/local-path-provisioner"]="docker.io/rancher/local-path-provisioner:v0.0.30"

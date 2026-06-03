@@ -6,13 +6,24 @@ IBM Z validation effort:
 - Upstream: [canonical/pe-ibm-microk8s-validation](https://github.com/canonical/pe-ibm-microk8s-validation)
 - Branch: `c-k8s-and-calico-experimental`
 
-These files are required by [`scripts/02b_setup_s390x_cni.sh`](../../scripts/02b_setup_s390x_cni.sh)
-to bootstrap Canonical K8s on s390x: the default cilium CNI does not run on Z,
-so K8s is bootstrapped with `network.enabled: false` and Calico is installed
-from `calico.yaml` in this directory. Each K8s addon (coredns, etc.) then needs
-its image source rewritten away from `ghcr.io/canonical/...` (which has no
-s390x builds) to an upstream registry — `rewrite-coredns.sh` is the reference
-implementation, generalized by [`tools/rewrite_k8s_addon_images.sh`](../../tools/rewrite_k8s_addon_images.sh).
+[`scripts/02b_setup_s390x_cni.sh`](../../scripts/02b_setup_s390x_cni.sh) uses
+`calico.yaml` to install the patched Calico CNI (the default cilium does not
+run on s390x), and uses the coredns image tag in `20-enable-dns.sh` as the
+ground truth for [`tools/rewrite_k8s_addon_images.sh`](../../tools/rewrite_k8s_addon_images.sh)'s
+`IMAGE_MAP`. The other vendored scripts are reference-only — useful when you
+want to know "how do they actually do X" without leaving the LPAR.
+
+Vendored files (all from the upstream repo root — the branch has a flat layout):
+
+| Vendored                                  | Purpose                                                        |
+|-------------------------------------------|----------------------------------------------------------------|
+| `calico.yaml`                             | Patched Calico manifest (applied by phase 02b)                 |
+| `k8s-bootstrap.yaml`                      | Upstream's k8s bootstrap config — reference; we generate ours  |
+| `15-build-cluster-calico.sh`              | Reference: how upstream bootstraps k8s + applies Calico        |
+| `20-enable-dns.sh`                        | Reference: how upstream enables coredns + rewrites its image   |
+| `40-test-basic-workloads.sh`              | Reference: upstream's basic-workload smoke test                |
+| `minimal-nginx-v2-no-storage.yaml`        | Reference: upstream's minimal-nginx workload spec              |
+| `static-nginx-three-node-lb.yaml`         | Reference: upstream's multi-node LB workload spec              |
 
 ## Why vendored
 
