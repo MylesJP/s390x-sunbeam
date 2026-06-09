@@ -1,5 +1,7 @@
-# Sunbeam manifest for single-node s390x deployment on 2026.1/edge (Gazpacho)
-# targeting Ubuntu 26.04 LTS (Resolute) as the host and charm base.
+# Sunbeam manifest for single-node s390x deployment on 2026.1/edge (Gazpacho).
+# Works on both Ubuntu 24.04 LTS (Noble) and 26.04 LTS (Resolute) hosts;
+# Sunbeam 2026.1 publishes charm revisions for both ubuntu@24.04 and
+# ubuntu@26.04 bases.
 #
 # IMPORTANT: Sunbeam manifest schemas drift across cycles. Before relying on this
 # verbatim, regenerate a current-shape skeleton with:

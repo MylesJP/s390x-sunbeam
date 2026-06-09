@@ -20,7 +20,9 @@ fully succeeds.
 
 ## Prerequisites
 
-- Ubuntu 26.04 LTS (Resolute) on s390x
+- Ubuntu 24.04 LTS (Noble) **or** 26.04 LTS (Resolute) on s390x. Sunbeam 2026.1
+  publishes charm revisions for both bases, and K8s + Calico (phases 00, 02b)
+  work identically on either.
 - A user with passwordless `sudo`
 - Outbound internet (Snap Store, ghcr.io, charmhub) — see "Behind a proxy" below
   if you're on a restricted-egress host

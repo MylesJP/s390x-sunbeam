@@ -61,9 +61,14 @@ if [[ -r /etc/os-release ]]; then
     if [[ "${ID:-}" != "ubuntu" ]]; then
         log "WARN: expected Ubuntu, got ID=${ID:-unknown}"
     fi
-    if [[ "${VERSION_ID:-}" != "26.04" ]]; then
-        log "WARN: expected 26.04 Resolute, got VERSION_ID=${VERSION_ID:-unknown}. Sunbeam 2026.1 charms target ubuntu@26.04; older bases will resolve to mismatched charm revisions."
-    fi
+    case "${VERSION_ID:-}" in
+        24.04|26.04)
+            log "host is Ubuntu ${VERSION_ID}. Sunbeam 2026.1 supports both Noble and Resolute bases."
+            ;;
+        *)
+            log "WARN: expected Ubuntu 24.04 (Noble) or 26.04 (Resolute), got VERSION_ID=${VERSION_ID:-unknown}. K8s may still work; Sunbeam phases (01-04, 06) are not tested on other bases."
+            ;;
+    esac
 fi
 
 mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
