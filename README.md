@@ -22,9 +22,29 @@ fully succeeds.
 
 - Ubuntu 26.04 LTS (Resolute) on s390x
 - A user with passwordless `sudo`
-- Outbound internet (Snap Store, ghcr.io, charmhub)
+- Outbound internet (Snap Store, ghcr.io, charmhub) — see "Behind a proxy" below
+  if you're on a restricted-egress host
 - ~32 GB RAM, ~200 GB disk (single-node Sunbeam with hypervisor)
 - `/dev/kvm` if you want Nova to actually launch instances
+
+## Behind a proxy
+
+Set `PROXY_URL` in your shell before running anything, and the phase scripts
+will configure shell env, `/etc/environment`, apt, snap, and the K8s snap's
+containerd to use it (via [tools/setup_proxy.sh](tools/setup_proxy.sh)).
+Verified on Canonical's ps6 LPARs:
+
+```bash
+export PROXY_URL=http://squid.ps6.internal:3128
+./run.sh all
+```
+
+On ps6 the Squid allowlist also needs to cover the OCI registries
+(`ghcr.io`, `docker.io`, `registry.k8s.io`, `quay.io`). The
+`ps6_s390x_openstack` ACL in
+[canonical-is-internal-proxy-configs](https://launchpad.net/canonical-is-internal-proxy-configs)
+already covers special18-22 (10.103.192.218-.222). Other LPARs need a
+follow-up MP adding their IPs to that ACL.
 
 ## Quickstart
 
@@ -83,6 +103,9 @@ always get a post-mortem tarball.
   (branch `c-k8s-and-calico-experimental`)
 - [tools/rewrite_k8s_addon_images.sh](tools/rewrite_k8s_addon_images.sh) —
   patch a K8s addon's `ghcr.io/canonical/...` images to upstream registries
+- [tools/setup_proxy.sh](tools/setup_proxy.sh) — configure HTTP proxy for env,
+  apt, snap, and the K8s snap's containerd; idempotent, no-ops when
+  `PROXY_URL`/`http_proxy` unset. Called automatically from phases 01 and 02b.
 - [vendor/pe-ibm/](vendor/pe-ibm/) — pinned snapshot of the pe-ibm files used
   by phase 02b
 
@@ -180,7 +203,7 @@ to a non-edge risk level or you want to try a fallback cycle:
 | Component             | Default                |
 |-----------------------|------------------------|
 | `openstack` snap      | `2026.1/edge`          |
-| `k8s` snap            | `1.32-classic/stable`  |
+| `k8s` snap            | `latest/edge`          |
 | `openstack-hypervisor`| `2026.1/edge`          |
 | `juju` snap           | `3/stable`             |
 | Core charms           | `2026.1/edge`          |

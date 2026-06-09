@@ -11,8 +11,16 @@ init_phase "${PHASE}"
 
 phase_skip_if_done "${PHASE}" && exit 0
 
+# Configure proxy first (no-op if PROXY_URL/http_proxy unset). This must run
+# before any snap install or apt-get so those operations go through the
+# proxy on restricted-egress hosts (e.g. ps6 LPARs).
+"${SCRIPT_DIR}/../tools/setup_proxy.sh"
+
 CHANNEL="${SUNBEAM_CHANNEL:-2026.1/edge}"
-K8S_CHANNEL="${K8S_CHANNEL:-1.32-classic/stable}"
+# NOTE: 1.32-classic/stable etc. do NOT publish for s390x as of 2026-06.
+# Only latest/edge is published for s390x (v1.35.3+). Override if a more
+# stable s390x track appears.
+K8S_CHANNEL="${K8S_CHANNEL:-latest/edge}"
 HYPERVISOR_CHANNEL="${HYPERVISOR_CHANNEL:-2026.1/edge}"
 JUJU_CHANNEL="${JUJU_CHANNEL:-3/stable}"
 

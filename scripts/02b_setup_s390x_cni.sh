@@ -16,6 +16,26 @@ init_phase "${PHASE}"
 
 phase_skip_if_done "${PHASE}" && exit 0
 
+# Re-apply proxy config. setup_proxy.sh is idempotent; calling it here
+# ensures the k8sd systemd drop-in gets installed once the k8s snap is on
+# disk (it would have been skipped if 01 ran before the snap install).
+"${SCRIPT_DIR}/../tools/setup_proxy.sh"
+
+# If the k8s snap isn't installed yet (e.g. user is running 02b standalone
+# without phase 02's sunbeam prepare-node-script, which is the realistic
+# path until Sunbeam 2026.1 publishes for s390x), install it directly.
+if ! command -v k8s >/dev/null 2>&1; then
+    K8S_CHANNEL="${K8S_CHANNEL:-latest/edge}"
+    log_step "k8s snap not present; installing from ${K8S_CHANNEL}"
+    "${SCRIPT_DIR}/../tools/check_snap_arch.sh" k8s "${K8S_CHANNEL}" || true
+    if ! sudo snap install k8s --classic --channel="${K8S_CHANNEL}"; then
+        log "FATAL: snap install k8s failed (s390x revision may not exist on ${K8S_CHANNEL})"
+        exit 1
+    fi
+    # Re-run setup_proxy now that k8sd exists so its systemd drop-in lands.
+    "${SCRIPT_DIR}/../tools/setup_proxy.sh"
+fi
+
 VENDOR_DIR="${REPO_ROOT}/vendor/pe-ibm"
 CALICO_YAML="${VENDOR_DIR}/calico.yaml"
 
@@ -69,6 +89,16 @@ sudo k8s kubectl wait --for=condition=Ready pods -A -l k8s-app=calico-kube-contr
 # 4. Enable required K8s addons and rewrite their images.
 # Sunbeam typically needs: dns (coredns), local-storage, load-balancer, gateway.
 # We enable conservatively; extend as Sunbeam's requirements firm up.
+# Canonical K8s ships metrics-server in kube-system by default (whether or
+# not it's `k8s enable`d). Its ghcr.io/canonical/metrics-server image has
+# no s390x build, so rewrite to upstream unconditionally before doing
+# anything that depends on a healthy cluster. Idempotent.
+if sudo k8s kubectl -n kube-system get deployment metrics-server >/dev/null 2>&1; then
+    log_step "rewriting bundled metrics-server image to upstream"
+    "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" metrics-server || \
+        log "WARN: metrics-server rewrite reported issues (see arch_report.md)"
+fi
+
 ADDONS=(dns local-storage load-balancer)
 for addon in "${ADDONS[@]}"; do
     log_step "enabling addon: ${addon}"
