@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Report whether a snap has an s390x revision in the requested channel.
-# Usage: check_snap_arch.sh <snap-name> <channel>
+# Report whether a snap has a revision for the target arch in the requested channel.
+# Usage: check_snap_arch.sh <snap-name> <channel> [arch]
+# arch defaults to ${TARGET_ARCH:-s390x}.
 # Writes one row to arch_report.md and prints yes/no/unknown to stdout.
 
 set -euo pipefail
@@ -11,6 +12,7 @@ source "${SCRIPT_DIR}/lib.sh"
 
 snap_name="${1:?snap name required}"
 channel="${2:?channel required}"
+arch="${3:-${TARGET_ARCH:-s390x}}"
 
 if ! command -v snap >/dev/null 2>&1; then
     arch_report_append snap "${snap_name}" "${channel}" unknown "snap CLI not installed"
@@ -38,11 +40,11 @@ if [[ -z "${channel_line}" ]]; then
     exit 0
 fi
 
-if grep -qw 's390x' <<<"${channel_line}"; then
-    arch_report_append snap "${snap_name}" "${channel}" yes ""
+if grep -qw "${arch}" <<<"${channel_line}"; then
+    arch_report_append snap "${snap_name}" "${channel}" "yes (${arch})" ""
     echo yes
 else
     archs=$(grep -oE '[a-z0-9]+(,[a-z0-9]+)+' <<<"${channel_line}" | head -n1)
-    arch_report_append snap "${snap_name}" "${channel}" no "published archs: ${archs:-unknown}"
+    arch_report_append snap "${snap_name}" "${channel}" "no (${arch})" "published archs: ${archs:-unknown}"
     echo no
 fi

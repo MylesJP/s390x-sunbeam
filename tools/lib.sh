@@ -77,18 +77,72 @@ init_phase() {
     log_step "phase ${phase} start"
 }
 
+# Deployment target architecture in Debian naming (amd64, s390x, arm64).
+# Override with TARGET_ARCH; otherwise use the host's dpkg architecture. This
+# repo is s390x-first but the whole workflow also runs on amd64 for dry-runs
+# while s390x artifacts are still publishing.
+target_arch() {
+    if [[ -n "${TARGET_ARCH:-}" ]]; then
+        echo "${TARGET_ARCH}"
+    elif command -v dpkg >/dev/null 2>&1; then
+        dpkg --print-architecture
+    else
+        case "$(uname -m)" in
+            x86_64) echo amd64 ;;
+            aarch64) echo arm64 ;;
+            *) uname -m ;;
+        esac
+    fi
+}
+
+# Map a Debian arch to the OpenStack/libosinfo image `architecture` property
+# (glance uses x86_64/aarch64, not amd64/arm64).
+glance_arch() {
+    case "$1" in
+        amd64) echo x86_64 ;;
+        arm64) echo aarch64 ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# juju_wait_settle <controller:model> [timeout_seconds]
+# Poll until every unit's juju (agent) status is settled (idle or error) or the
+# timeout elapses. Deliberately does NOT require workload=active: on s390x some
+# apps are expected to block on missing OCI images/snaps -- that is the signal we
+# want to capture, not hang on. Returns 0 when settled, 1 on timeout.
+juju_wait_settle() {
+    local target="$1" timeout="${2:-3600}"
+    local deadline busy
+    deadline=$(( $(date +%s) + timeout ))
+    while (( $(date +%s) < deadline )); do
+        busy=$(juju status -m "${target}" --format=json 2>/dev/null \
+            | jq '[.applications[].units // {} | .[] | .["juju-status"].current]
+                  | map(select(. != "idle" and . != "error")) | length' 2>/dev/null || echo 1)
+        if [[ "${busy}" == "0" ]]; then
+            log "model ${target} settled (no busy agents)"
+            return 0
+        fi
+        sleep 30
+    done
+    log "WARN: ${target} did not settle within ${timeout}s; continuing"
+    return 1
+}
+
 # Append a row to arch_report.md, creating the file/header if absent.
 arch_report_append() {
-    local kind="$1" name="$2" channel_or_tag="$3" s390x="$4" note="$5"
+    local kind="$1" name="$2" channel_or_tag="$3" available="$4" note="$5"
     if [[ ! -s "${ARCH_REPORT}" ]]; then
         cat > "${ARCH_REPORT}" <<'EOF'
-# s390x availability report
+# Architecture availability report
 
-| kind | name | channel/tag | s390x | note |
-|------|------|-------------|-------|------|
+The `available` column reads `yes (<arch>)` / `no (<arch>)` for the deploy target
+arch (TARGET_ARCH, default the host's dpkg arch).
+
+| kind | name | channel/tag | available | note |
+|------|------|-------------|-----------|------|
 EOF
     fi
     printf '| %s | %s | %s | %s | %s |\n' \
-        "${kind}" "${name}" "${channel_or_tag}" "${s390x}" "${note}" \
+        "${kind}" "${name}" "${channel_or_tag}" "${available}" "${note}" \
         >> "${ARCH_REPORT}"
 }

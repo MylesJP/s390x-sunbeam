@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Phase 02: run Sunbeam's prepare-node-script.
+# Phase 02: host preparation for the bundle-based workflow.
+#
+# Replaces the old `sunbeam prepare-node-script` step. Without the Sunbeam CLI we
+# only need: (1) the juju/k8s CLIs present, (2) kernel modules + /dev/kvm facts
+# for the hypervisor, and (3) passwordless SSH back to this host so phase 03b can
+# enrol the LPAR as machine 0 of a Juju MANUAL cloud (where the hypervisor runs on
+# bare metal).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,45 +17,66 @@ init_phase "${PHASE}"
 
 phase_skip_if_done "${PHASE}" && exit 0
 
-if ! command -v sunbeam >/dev/null 2>&1; then
-    log "FATAL: sunbeam CLI not on PATH. Did phase 01 install the openstack snap successfully?"
+"${SCRIPT_DIR}/../tools/setup_proxy.sh"
+
+if ! command -v juju >/dev/null 2>&1; then
+    log "FATAL: juju CLI not on PATH. Did phase 01 install the juju snap successfully?"
     exit 1
 fi
 
-prep_script="${ARTIFACT_DIR}/prepare-node.sh"
-log_step "fetching prepare-node-script to ${prep_script}"
-if ! sunbeam prepare-node-script > "${prep_script}" 2> >(tee -a "${PHASE_LOG}" >&2); then
-    log "FATAL: sunbeam prepare-node-script failed"
-    exit 1
-fi
-chmod +x "${prep_script}"
+# 1. Kernel modules useful for OVN/OVS data plane + KVM, and /dev/kvm presence
+#    (nova can't launch instances without it). Non-fatal: record the facts.
+ARCH="$(target_arch)"
+# kvm_intel/kvm_amd are amd64-only; kvm is the generic base (and the s390x KVM
+# module). modprobe is best-effort -- missing/builtin modules are fine.
+log_step "loading kernel modules (overlay, br_netfilter, vhost_vsock, kvm + vendor)"
+for mod in overlay br_netfilter vhost_vsock kvm kvm_intel kvm_amd; do
+    sudo modprobe "${mod}" 2>>"${PHASE_LOG}" || log "note: modprobe ${mod} skipped (builtin/unavailable on ${ARCH})"
+done
 
-log_step "executing prepare-node-script"
-if ! run_logged "prepare-node-script" -- bash -x "${prep_script}"; then
-    log "WARN: prepare-node-script returned non-zero. Continuing to re-introspect snap arch."
+if [[ -e /dev/kvm ]]; then
+    log "OK: /dev/kvm present -- nova can launch instances on this LPAR"
+    arch_report_append host /dev/kvm n/a yes "present"
+else
+    log "WARN: /dev/kvm absent -- nova boot/scenario Tempest tests will fail. Enable s390x KVM on this LPAR."
+    arch_report_append host /dev/kvm n/a no "absent -- no hardware-accelerated instances"
 fi
 
+# 2. Passwordless SSH to this host for the manual-cloud enrolment in phase 03b.
+#    juju add-machine ssh:<user>@<host> needs key-based login + passwordless sudo
+#    (the latter is a documented prerequisite of this repo).
+log_step "ensuring key-based SSH back to this host (for juju manual cloud)"
+if ! dpkg -s openssh-server >/dev/null 2>&1; then
+    run_logged "apt install openssh-server" -- sudo apt-get install -y openssh-server || \
+        log "WARN: openssh-server install failed; phase 03b add-machine will fail"
+fi
+ssh_key="${HOME}/.ssh/id_ed25519"
+if [[ ! -f "${ssh_key}" ]]; then
+    log_step "generating ${ssh_key}"
+    ssh-keygen -t ed25519 -N "" -f "${ssh_key}" -C "s390x-sunbeam-manual-cloud" 2>>"${PHASE_LOG}"
+fi
+auth_keys="${HOME}/.ssh/authorized_keys"
+touch "${auth_keys}"; chmod 600 "${auth_keys}"
+if ! grep -qF "$(cut -d' ' -f2 "${ssh_key}.pub")" "${auth_keys}" 2>/dev/null; then
+    cat "${ssh_key}.pub" >> "${auth_keys}"
+    log "added local pubkey to ${auth_keys}"
+fi
+# Record the address phase 03b should use to reach this host.
+host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+host_ip="${host_ip:-127.0.0.1}"
+echo "${host_ip}" > "${ARTIFACT_DIR}/manual_host_ip"
+log "manual-cloud host address recorded: ${host_ip} (-> ${ARTIFACT_DIR}/manual_host_ip)"
+# Best-effort: prime known_hosts so the non-interactive add-machine in 03b works.
+ssh-keyscan -H "${host_ip}" >> "${HOME}/.ssh/known_hosts" 2>>"${PHASE_LOG}" || true
+
+# 3. Re-introspect installed snap archs for the record.
 log_step "post-install snap arch introspection"
-for snap_name in openstack k8s openstack-hypervisor juju; do
+for snap_name in juju k8s; do
     if snap list "${snap_name}" >/dev/null 2>&1; then
         installed_channel=$(snap list "${snap_name}" 2>/dev/null | awk 'NR==2 {print $4}')
-        "${SCRIPT_DIR}/../tools/check_snap_arch.sh" "${snap_name}" "${installed_channel}" || true
+        "${SCRIPT_DIR}/../tools/check_snap_arch.sh" "${snap_name}" "${installed_channel}" "${ARCH}" || true
     fi
 done
-
-# Group check: prepare-node-script adds the user to `snap_daemon` and friends.
-# A new login shell is needed for groups to take effect.
-current_groups=$(id -nG)
-need_relogin=0
-for g in snap_daemon; do
-    if ! grep -qw "${g}" <<<"${current_groups}"; then
-        log "NOTE: not yet in group ${g} for this shell"
-        need_relogin=1
-    fi
-done
-if (( need_relogin == 1 )); then
-    log "ACTION REQUIRED: log out and back in (or 'newgrp snap_daemon') before phase 03 so group membership takes effect."
-fi
 
 phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"

@@ -50,10 +50,19 @@ env_file="${ARTIFACT_DIR}/env.txt"
 log_step "wrote ${env_file}"
 
 arch=$(uname -m)
-if [[ "${arch}" != "s390x" ]]; then
-    log "FATAL: expected s390x host, got ${arch}"
-    exit 1
-fi
+target="$(target_arch)"
+log "host arch: ${arch} (deploy target arch: ${target})"
+case "${target}" in
+    s390x)
+        log "s390x: the primary target. Expect K8s s390x prep (phase 02b) + possible artifact gaps."
+        ;;
+    amd64)
+        log "amd64: dry-run target. The full workflow runs here with the stock cilium CNI (no Calico)."
+        ;;
+    *)
+        log "WARN: unexpected target arch '${target}'. Only s390x and amd64 are exercised; proceeding anyway."
+        ;;
+esac
 
 if [[ -r /etc/os-release ]]; then
     # shellcheck disable=SC1091

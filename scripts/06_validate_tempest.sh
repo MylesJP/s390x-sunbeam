@@ -28,13 +28,18 @@ phase_skip_if_done "${PHASE}" && exit 0
 
 OPENRC="${ARTIFACT_DIR}/cloud-admin-openrc"
 if [[ ! -r "${OPENRC}" ]]; then
-    log "FATAL: ${OPENRC} not found. Phase 04 (sunbeam configure) must succeed first."
+    log "FATAL: ${OPENRC} not found. Phase 04 (configure) must succeed first."
     exit 1
 fi
 
 TEMPEST_DIR="${ARTIFACT_DIR}/tempest"
 REPORT_DIR="${ARTIFACT_DIR}/tempest_report"
 mkdir -p "${TEMPEST_DIR}" "${REPORT_DIR}"
+
+# Guest image for discover-tempest-config, matched to the deploy arch (an s390x
+# image won't boot on an amd64 dry-run and vice versa). Overridable.
+ARCH="$(target_arch)"
+TEMPEST_IMAGE_URL="${TEMPEST_IMAGE_URL:-https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-${ARCH}.img}"
 
 EXCLUDE_LIST="${REPO_ROOT}/vendor/zopenstack/exclude-list.txt"
 if [[ ! -s "${EXCLUDE_LIST}" ]]; then
@@ -83,7 +88,7 @@ log_step "generating tempest.conf via python-tempestconf"
         --out "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
         --debug \
         --create \
-        --image https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-s390x-disk.img \
+        --image "${TEMPEST_IMAGE_URL}" \
         --network-id "$(openstack network show external-network -f value -c id 2>/dev/null || true)"
 ) 2>&1 | tee "${TEMPEST_DIR}/tempestconf.log" || \
     log "WARN: discover-tempest-config returned non-zero; check ${TEMPEST_DIR}/tempestconf.log"
@@ -143,7 +148,9 @@ log_step "writing diagnostic dumps to ${REPORT_DIR}"
     openstack hypervisor list             > "${REPORT_DIR}/hypervisor_list.txt"   2>&1
     openstack server list --all-projects  > "${REPORT_DIR}/server_list.txt"       2>&1
     openstack volume list --all-projects  > "${REPORT_DIR}/volume_list.txt"       2>&1
-    juju status --format=yaml             > "${REPORT_DIR}/juju_status.txt"       2>&1
+    _ctrl="${JUJU_CONTROLLER:-sunbeam-controller}"
+    juju status -m "${_ctrl}:openstack" --format=yaml > "${REPORT_DIR}/juju_status_openstack.txt" 2>&1
+    juju status -m "${_ctrl}:machines"  --format=yaml > "${REPORT_DIR}/juju_status_machines.txt"  2>&1
 )
 
 if (( rc != 0 )); then
