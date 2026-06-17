@@ -11,22 +11,30 @@ init_phase "${PHASE}"
 
 # Intentionally do NOT phase_skip_if_done: re-running this should always refresh.
 
-bundle="${ARTIFACT_DIR}/juju_bundle.yaml"
-status_file="${ARTIFACT_DIR}/juju_status.txt"
-status_rel="${ARTIFACT_DIR}/juju_status_relations.txt"
 k8s_yaml="${ARTIFACT_DIR}/k8s_resources.yaml"
 k8s_events="${ARTIFACT_DIR}/k8s_events.txt"
 k8s_nodes="${ARTIFACT_DIR}/k8s_nodes_describe.txt"
 snaps_file="${ARTIFACT_DIR}/snaps.txt"
+bundle="${ARTIFACT_DIR}/juju_bundle.yaml"   # primary (openstack) bundle, for OCI sweep
 
-log_step "juju export bundle -> ${bundle}"
-juju export bundle > "${bundle}" 2>> "${PHASE_LOG}" || \
-    log "WARN: juju export bundle failed (no model? bootstrap incomplete?)"
+CONTROLLER="${JUJU_CONTROLLER:-sunbeam-controller}"
+# Capture every model on the controller (openstack control plane + machines).
+mapfile -t MODELS < <(juju models --format=json 2>/dev/null \
+    | jq -r '.models[]."short-name"' 2>/dev/null | grep -v '^controller$' || true)
+[[ ${#MODELS[@]} -eq 0 ]] && MODELS=(openstack machines)
 
-log_step "juju status -> ${status_file}"
-juju status --format=yaml > "${status_file}" 2>> "${PHASE_LOG}" || \
-    log "WARN: juju status failed"
-juju status --relations --color=false > "${status_rel}" 2>> "${PHASE_LOG}" || true
+log_step "capturing juju state for models: ${MODELS[*]}"
+for m in "${MODELS[@]}"; do
+    tgt="${CONTROLLER}:${m}"
+    juju export bundle -m "${tgt}" > "${ARTIFACT_DIR}/juju_bundle_${m}.yaml" 2>> "${PHASE_LOG}" || \
+        log "WARN: juju export bundle (${m}) failed"
+    juju status -m "${tgt}" --format=yaml > "${ARTIFACT_DIR}/juju_status_${m}.txt" 2>> "${PHASE_LOG}" || \
+        log "WARN: juju status (${m}) failed"
+    juju status -m "${tgt}" --relations --color=false > "${ARTIFACT_DIR}/juju_status_relations_${m}.txt" 2>> "${PHASE_LOG}" || true
+done
+juju offers -m "${CONTROLLER}:openstack" > "${ARTIFACT_DIR}/juju_offers.txt" 2>> "${PHASE_LOG}" || true
+# Primary bundle for the OCI arch sweep below = the control-plane (openstack) one.
+cp -f "${ARTIFACT_DIR}/juju_bundle_openstack.yaml" "${bundle}" 2>/dev/null || true
 
 log_step "k8s resources -> ${k8s_yaml}"
 if command -v k8s >/dev/null 2>&1; then
@@ -43,7 +51,7 @@ log_step "snap inventory -> ${snaps_file}"
     echo "=== snap list ==="
     snap list 2>&1 || true
     echo
-    for s in openstack k8s openstack-hypervisor juju microceph; do
+    for s in juju k8s openstack-hypervisor microceph cinder-volume; do
         echo "=== snap info ${s} ==="
         snap info --verbose "${s}" 2>&1 || true
         echo

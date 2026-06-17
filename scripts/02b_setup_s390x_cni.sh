@@ -1,10 +1,19 @@
 #!/usr/bin/env bash
-# Phase 02b: bootstrap Canonical K8s with cilium disabled, install Calico from
-# the vendored pe-ibm manifest, enable required addons and rewrite their image
-# references to upstream registries that have s390x builds.
+# Phase 02b: bring up Canonical K8s and a load-balancer pool.
 #
-# Runs between phase 02 (snap install) and phase 03 (sunbeam cluster bootstrap)
-# so that when Sunbeam attempts to bring k8s up, it finds a working cluster.
+# Arch-aware:
+#   * s390x  -- bootstrap with the bundled CNI (cilium) DISABLED, install Calico
+#               from the vendored pe-ibm manifest, and rewrite addon images to
+#               upstream registries that have s390x builds. (cilium and several
+#               ghcr.io/canonical addon images have no z/power build.)
+#   * amd64  -- bootstrap stock (cilium enabled), no Calico, no image rewrites.
+#     /other   This is the dry-run path used while s390x artifacts publish.
+#
+# Common to both: enable dns + local-storage, configure an L2 load-balancer pool
+# so traefik-k8s gets an external IP, and smoke-test pod scheduling.
+#
+# Runs between phase 02 (host prep) and phase 03 (juju bootstrap) so that when
+# juju registers the K8s cloud, it finds a working cluster.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,115 +25,149 @@ init_phase "${PHASE}"
 
 phase_skip_if_done "${PHASE}" && exit 0
 
-# Re-apply proxy config. setup_proxy.sh is idempotent; calling it here
-# ensures the k8sd systemd drop-in gets installed once the k8s snap is on
-# disk (it would have been skipped if 01 ran before the snap install).
+ARCH="$(target_arch)"
+log_step "K8s setup for target arch: ${ARCH}"
+
+# Re-apply proxy config. setup_proxy.sh is idempotent; calling it here ensures
+# the k8sd systemd drop-in gets installed once the k8s snap is on disk.
 "${SCRIPT_DIR}/../tools/setup_proxy.sh"
 
-# If the k8s snap isn't installed yet (e.g. user is running 02b standalone
-# without phase 02's sunbeam prepare-node-script, which is the realistic
-# path until Sunbeam 2026.1 publishes for s390x), install it directly.
+# Install the k8s snap if absent (the bundle workflow has no separate snap phase).
 if ! command -v k8s >/dev/null 2>&1; then
     K8S_CHANNEL="${K8S_CHANNEL:-latest/edge}"
     log_step "k8s snap not present; installing from ${K8S_CHANNEL}"
-    "${SCRIPT_DIR}/../tools/check_snap_arch.sh" k8s "${K8S_CHANNEL}" || true
+    "${SCRIPT_DIR}/../tools/check_snap_arch.sh" k8s "${K8S_CHANNEL}" "${ARCH}" || true
     if ! sudo snap install k8s --classic --channel="${K8S_CHANNEL}"; then
-        log "FATAL: snap install k8s failed (s390x revision may not exist on ${K8S_CHANNEL})"
+        log "FATAL: snap install k8s failed (no ${ARCH} revision on ${K8S_CHANNEL}?)"
         exit 1
     fi
     # Re-run setup_proxy now that k8sd exists so its systemd drop-in lands.
     "${SCRIPT_DIR}/../tools/setup_proxy.sh"
 fi
+command -v k8s >/dev/null 2>&1 || { log "FATAL: 'k8s' CLI missing and could not be installed."; exit 1; }
+
+# --- arch flag: only s390x needs the Calico + image-rewrite workarounds --------
+NEEDS_S390X_CNI=0
+[[ "${ARCH}" == "s390x" ]] && NEEDS_S390X_CNI=1
 
 VENDOR_DIR="${REPO_ROOT}/vendor/pe-ibm"
 CALICO_YAML="${VENDOR_DIR}/calico.yaml"
-
-if [[ ! -s "${CALICO_YAML}" ]]; then
+if (( NEEDS_S390X_CNI )) && [[ ! -s "${CALICO_YAML}" ]]; then
     log "FATAL: ${CALICO_YAML} missing. Run ./tools/refresh_pe_ibm.sh first to vendor it from canonical/pe-ibm-microk8s-validation."
     exit 1
 fi
 
-if ! command -v k8s >/dev/null 2>&1; then
-    log "FATAL: 'k8s' CLI missing. Did phase 02 (sunbeam prepare-node-script) complete?"
-    exit 1
-fi
-
-# 1. Write the k8s bootstrap config: disable the bundled CNI so Calico can
-#    take over. pod-cidr and svc-cidr left as snap defaults; if the vendored
-#    calico.yaml hard-codes a different pod CIDR you'll see calico pods fail
-#    and need to add `pod-cidr` overrides here.
+# 1. Bootstrap config. s390x: disable bundled CNI so Calico can take over.
+#    amd64/other: stock bootstrap (cilium stays enabled).
 k8s_cfg="${ARTIFACT_DIR}/k8s-bootstrap.yaml"
-log_step "writing ${k8s_cfg}"
-cat > "${k8s_cfg}" <<'EOF'
+if (( NEEDS_S390X_CNI )); then
+    log_step "writing ${k8s_cfg} (cilium disabled for s390x)"
+    cat > "${k8s_cfg}" <<'EOF'
 cluster-config:
   network:
     enabled: false
 EOF
+    bootstrap_desc="k8s bootstrap (cilium disabled)"
+    bootstrap_args=(--file "${k8s_cfg}")
+else
+    log_step "stock k8s bootstrap (cilium enabled)"
+    bootstrap_desc="k8s bootstrap (stock)"
+    bootstrap_args=()
+fi
 
 # 2. Bootstrap k8s.
 if sudo k8s status >/dev/null 2>&1; then
     log "k8s already bootstrapped; skipping bootstrap step"
 else
-    if ! run_logged "k8s bootstrap (cilium disabled)" -- sudo k8s bootstrap --file "${k8s_cfg}"; then
+    if ! run_logged "${bootstrap_desc}" -- sudo k8s bootstrap "${bootstrap_args[@]}"; then
         log "FATAL: k8s bootstrap failed"
         exit 1
     fi
 fi
 
-# 3. Apply vendored Calico.
-log_step "applying vendored Calico from ${CALICO_YAML}"
-if ! run_logged "kubectl apply -f calico.yaml" -- sudo k8s kubectl apply -f "${CALICO_YAML}"; then
-    log "FATAL: calico apply failed"
-    exit 1
+# 3. (s390x only) Apply vendored Calico and wait for it.
+if (( NEEDS_S390X_CNI )); then
+    log_step "applying vendored Calico from ${CALICO_YAML}"
+    if ! run_logged "kubectl apply -f calico.yaml" -- sudo k8s kubectl apply -f "${CALICO_YAML}"; then
+        log "FATAL: calico apply failed"
+        exit 1
+    fi
+    log_step "waiting for calico pods Ready (up to 5 min)"
+    sudo k8s kubectl wait --for=condition=Ready pods -A -l k8s-app=calico-node --timeout=300s 2>&1 \
+        | tee -a "${PHASE_LOG}" || log "WARN: not all calico-node pods reached Ready"
+    sudo k8s kubectl wait --for=condition=Ready pods -A -l k8s-app=calico-kube-controllers --timeout=300s 2>&1 \
+        | tee -a "${PHASE_LOG}" || log "WARN: calico-kube-controllers did not reach Ready"
 fi
 
-log_step "waiting for calico pods Ready (up to 5 min)"
-sudo k8s kubectl wait --for=condition=Ready pods -A -l k8s-app=calico-node --timeout=300s 2>&1 \
-    | tee -a "${PHASE_LOG}" \
-    || log "WARN: not all calico-node pods reached Ready"
-sudo k8s kubectl wait --for=condition=Ready pods -A -l k8s-app=calico-kube-controllers --timeout=300s 2>&1 \
-    | tee -a "${PHASE_LOG}" \
-    || log "WARN: calico-kube-controllers did not reach Ready"
-
-# 4. Enable required K8s addons and rewrite their images.
-# Sunbeam typically needs: dns (coredns), local-storage, load-balancer, gateway.
-# We enable conservatively; extend as Sunbeam's requirements firm up.
-# Canonical K8s ships metrics-server in kube-system by default (whether or
-# not it's `k8s enable`d). Its ghcr.io/canonical/metrics-server image has
-# no s390x build, so rewrite to upstream unconditionally before doing
-# anything that depends on a healthy cluster. Idempotent.
-if sudo k8s kubectl -n kube-system get deployment metrics-server >/dev/null 2>&1; then
-    log_step "rewriting bundled metrics-server image to upstream"
+# (s390x only) Canonical K8s ships metrics-server in kube-system whose
+# ghcr.io/canonical image has no s390x build; rewrite to upstream. On amd64 the
+# bundled image is fine, so skip.
+if (( NEEDS_S390X_CNI )) && sudo k8s kubectl -n kube-system get deployment metrics-server >/dev/null 2>&1; then
+    log_step "rewriting bundled metrics-server image to upstream (s390x)"
     "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" metrics-server || \
         log "WARN: metrics-server rewrite reported issues (see arch_report.md)"
 fi
 
-ADDONS=(dns local-storage load-balancer)
+# 4. Enable core addons. Rewrite their images to upstream only on s390x.
+ADDONS=(dns local-storage)
 for addon in "${ADDONS[@]}"; do
     log_step "enabling addon: ${addon}"
     run_logged "k8s enable ${addon}" -- sudo k8s enable "${addon}" || \
         log "WARN: k8s enable ${addon} returned non-zero"
-    # Even if enable failed, attempt rewrite -- the workloads may exist but be
-    # CrashLooping due to image pulls.
-    "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" "${addon}" || \
-        log "WARN: rewrite_k8s_addon_images for ${addon} reported unmapped images"
+    if (( NEEDS_S390X_CNI )); then
+        "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" "${addon}" || \
+            log "WARN: rewrite_k8s_addon_images for ${addon} reported unmapped images"
+    fi
 done
 
-# 5. Smoke-test: schedule an arbitrary s390x pod and confirm it reaches Ready.
+# 4b. Load-balancer addon WITH an explicit L2 address pool (both arches). Without
+# an external IP pool, traefik-k8s never gets a LoadBalancer IP, keystone's
+# public_endpoint never resolves, and the openrc (phase 04) is unusable -- the
+# single most likely place a deploy stalls. The bundle's traefik annotation
+# (metallb.universe.tf/address-pool=public) is a no-op for the Canonical K8s
+# addon; we rely on the addon's own L2 pool. If the L2 announcer does not work
+# (e.g. under Calico on s390x), install MetalLB with a pool named `public`.
+#
+# LB_CIDR must be a host-routable range on the node's L2 segment. Override via
+# env; otherwise derive a small range from the primary /24 and warn loudly.
+if [[ -z "${LB_CIDR:-}" ]]; then
+    host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    if [[ -n "${host_ip}" ]]; then
+        prefix="${host_ip%.*}"
+        LB_CIDR="${prefix}.240-${prefix}.250"
+        log "WARN: LB_CIDR not set; derived ${LB_CIDR} from host IP ${host_ip}. Verify this range is free + routable, or re-run with LB_CIDR set."
+    else
+        LB_CIDR="10.20.20.240-10.20.20.250"
+        log "WARN: could not derive host IP; defaulting LB_CIDR=${LB_CIDR}. Almost certainly needs overriding."
+    fi
+fi
+log_step "enabling load-balancer addon with L2 pool ${LB_CIDR}"
+run_logged "k8s enable load-balancer" -- sudo k8s enable load-balancer || \
+    log "WARN: k8s enable load-balancer returned non-zero"
+run_logged "k8s set load-balancer pool" -- \
+    sudo k8s set "load-balancer.l2-mode=true" "load-balancer.cidrs=${LB_CIDR}" || \
+    log "WARN: k8s set load-balancer failed; traefik may not get an external IP"
+if (( NEEDS_S390X_CNI )); then
+    "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" load-balancer || \
+        log "WARN: rewrite_k8s_addon_images for load-balancer reported unmapped images"
+fi
+echo "${LB_CIDR}" > "${ARTIFACT_DIR}/lb_cidr"
+
+# 5. Smoke-test: schedule a pod and confirm it reaches Ready (CNI + image pull).
 log_step "smoke test: scheduling an ubuntu pod"
-sudo k8s kubectl delete pod s390x-smoke --ignore-not-found
-if sudo k8s kubectl run s390x-smoke --image=ubuntu --restart=Never --command -- sleep 30 2>&1 | tee -a "${PHASE_LOG}"; then
-    if sudo k8s kubectl wait --for=condition=Ready pod/s390x-smoke --timeout=120s 2>&1 | tee -a "${PHASE_LOG}"; then
-        log "smoke pod reached Ready -- pod networking and image pull work on this LPAR"
-        arch_report_append k8s-smoke s390x-smoke ubuntu yes "scheduled+pulled+ready"
+sudo k8s kubectl delete pod k8s-smoke --ignore-not-found
+if sudo k8s kubectl run k8s-smoke --image=ubuntu --restart=Never --command -- sleep 30 2>&1 | tee -a "${PHASE_LOG}"; then
+    if sudo k8s kubectl wait --for=condition=Ready pod/k8s-smoke --timeout=120s 2>&1 | tee -a "${PHASE_LOG}"; then
+        log "smoke pod reached Ready -- pod networking and image pull work on this node"
+        arch_report_append k8s-smoke k8s-smoke ubuntu "yes (${ARCH})" "scheduled+pulled+ready"
     else
         log "WARN: smoke pod did not reach Ready"
-        sudo k8s kubectl describe pod s390x-smoke 2>&1 | tee -a "${PHASE_LOG}" || true
-        arch_report_append k8s-smoke s390x-smoke ubuntu no "scheduled but not Ready -- see phase log"
+        sudo k8s kubectl describe pod k8s-smoke 2>&1 | tee -a "${PHASE_LOG}" || true
+        arch_report_append k8s-smoke k8s-smoke ubuntu "no (${ARCH})" "scheduled but not Ready -- see phase log"
     fi
-    sudo k8s kubectl delete pod s390x-smoke --ignore-not-found
+    sudo k8s kubectl delete pod k8s-smoke --ignore-not-found
 else
-    arch_report_append k8s-smoke s390x-smoke ubuntu no "kubectl run failed"
+    arch_report_append k8s-smoke k8s-smoke ubuntu "no (${ARCH})" "kubectl run failed"
 fi
 
 phase_done "${PHASE}"
