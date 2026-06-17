@@ -10,13 +10,15 @@ PHASE=99_collect_artifacts
 init_phase "${PHASE}"
 
 tarball="${ARTIFACT_DIR}/sunbeam-s390x-${RUN_ID}.tar.zst"
+tmp_tarball="${ARTIFACT_DIR}.sunbeam-s390x-${RUN_ID}.tar.zst.tmp"
 log_step "creating ${tarball}"
 
-# Exclude the tarball itself if a previous attempt left one behind.
+# Write outside ARTIFACT_DIR first so tar never archives the file it is creating.
 tar --zstd \
     --exclude="$(basename "${tarball}")" \
-    -cf "${tarball}" \
+    -cf "${tmp_tarball}" \
     -C "${ARTIFACT_DIR}" .
+mv "${tmp_tarball}" "${tarball}"
 
 log_step "phase status summary:"
 {

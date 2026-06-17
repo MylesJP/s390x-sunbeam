@@ -34,16 +34,16 @@ fi
 
 # SSH target for the manual machine = this LPAR (recorded by phase 02).
 host_ip="$(cat "${ARTIFACT_DIR}/manual_host_ip" 2>/dev/null || true)"
-host_ip="${host_ip:-127.0.0.1}"
+if [[ -z "${host_ip}" ]]; then
+    host_ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}')"
+    host_ip="${host_ip:-127.0.0.1}"
+    echo "${host_ip}" > "${ARTIFACT_DIR}/manual_host_ip"
+fi
 ssh_user="$(id -un)"
 ssh_target="${ssh_user}@${host_ip}"
-
-# 1. Register a manual cloud pointing at this LPAR, on the existing controller.
-if juju clouds --client 2>/dev/null | grep -qw "${MANUAL_CLOUD}"; then
-    log "manual cloud ${MANUAL_CLOUD} already registered"
-else
-    cloud_yaml="${ARTIFACT_DIR}/manual-cloud.yaml"
-    cat > "${cloud_yaml}" <<EOF
+ssh-keyscan -H "${host_ip}" >> "${HOME}/.ssh/known_hosts" 2>>"${PHASE_LOG}" || true
+cloud_yaml="${ARTIFACT_DIR}/manual-cloud.yaml"
+cat > "${cloud_yaml}" <<EOF
 clouds:
   ${MANUAL_CLOUD}:
     type: manual
@@ -51,10 +51,21 @@ clouds:
     regions:
       default: {}
 EOF
-    log_step "adding manual cloud ${MANUAL_CLOUD} (endpoint ${ssh_target})"
+
+# 1. Register a manual cloud pointing at this LPAR, on the existing controller.
+if juju clouds --client 2>/dev/null | grep -qw "${MANUAL_CLOUD}"; then
+    log "manual cloud ${MANUAL_CLOUD} already registered with juju client"
+else
+    log_step "adding manual cloud ${MANUAL_CLOUD} to client (endpoint ${ssh_target})"
     run_logged "juju add-cloud (client)" -- juju add-cloud --client "${MANUAL_CLOUD}" "${cloud_yaml}"
+fi
+
+if juju clouds --controller "${CONTROLLER}" 2>/dev/null | grep -qw "${MANUAL_CLOUD}"; then
+    log "manual cloud ${MANUAL_CLOUD} already registered with controller ${CONTROLLER}"
+else
+    log_step "adding manual cloud ${MANUAL_CLOUD} to controller ${CONTROLLER}"
     run_logged "juju add-cloud (controller)" -- \
-        juju add-cloud --controller "${CONTROLLER}" "${MANUAL_CLOUD}" "${cloud_yaml}" || \
+        juju add-cloud --controller "${CONTROLLER}" --force "${MANUAL_CLOUD}" "${cloud_yaml}" || \
         log "WARN: add-cloud to controller returned non-zero (may already be known)"
 fi
 
@@ -86,7 +97,8 @@ fi
 log_step "deploying machine bundle into ${MACHINE_MODEL}"
 rc=0
 run_logged "juju deploy machine bundle" -- \
-    juju deploy -m "${CONTROLLER}:${MACHINE_MODEL}" "${BUNDLE}" || rc=$?
+    juju deploy -m "${CONTROLLER}:${MACHINE_MODEL}" "${BUNDLE}" \
+        --map-machines=existing,0=0 || rc=$?
 if (( rc != 0 )); then
     log "WARN: juju deploy (machine) returned ${rc}. Phase 05 will still capture state."
     echo "${rc}" > "${ARTIFACT_DIR}/.status/${PHASE}.failed"

@@ -42,10 +42,6 @@ applications:
     trust: true
     options:
       minimum-replicas: 1
-    offers:
-      amqp:
-        endpoints:
-          - amqp
   tls-operator:
     charm: self-signed-certificates
     channel: 1/beta
@@ -53,10 +49,6 @@ applications:
     scale: 1
     options:
       ca-common-name: internal-ca
-    offers:
-      certificates:
-        endpoints:
-          - certificates
   traefik:
     charm: traefik-k8s
     channel: latest/candidate
@@ -81,10 +73,6 @@ applications:
     base: ubuntu@24.04
     scale: 1
     trust: true
-    offers:
-      ovsdb-cms:
-        endpoints:
-          - ovsdb-cms-relay
   keystone:
     charm: keystone-k8s
     channel: 2026.1/edge
@@ -94,16 +82,6 @@ applications:
     storage:
       fernet-keys: 5M
       credential-keys: 5M
-    offers:
-      identity-service:
-        endpoints:
-          - identity-service
-      identity-credentials:
-        endpoints:
-          - identity-credentials
-      send-ca-cert:
-        endpoints:
-          - send-ca-cert
   glance:
     charm: glance-k8s
     channel: 2026.1/edge
@@ -124,10 +102,6 @@ applications:
     base: ubuntu@24.04
     scale: 1
     trust: true
-    offers:
-      nova-service:
-        endpoints:
-          - nova-service
   neutron:
     charm: neutron-k8s
     channel: 2026.1/edge
@@ -144,10 +118,6 @@ applications:
     trust: true
     options:
       expose-external: loadbalancer
-    offers:
-      cinder-database:
-        endpoints:
-          - database
   cinder:
     charm: cinder-k8s
     channel: 2026.1/edge
@@ -238,3 +208,42 @@ relations:
     - cinder:receive-ca-cert
   - - glance:image-service
     - cinder:image-service
+
+---
+applications:
+  rabbitmq:
+    offers:
+      amqp:
+        endpoints:
+          - amqp
+  tls-operator:
+    offers:
+      certificates:
+        endpoints:
+          - certificates
+  ovn-relay:
+    offers:
+      ovsdb-cms:
+        endpoints:
+          - ovsdb-cms-relay
+  keystone:
+    offers:
+      identity-service:
+        endpoints:
+          - identity-service
+      identity-credentials:
+        endpoints:
+          - identity-credentials
+      send-ca-cert:
+        endpoints:
+          - send-ca-cert
+  nova:
+    offers:
+      nova-service:
+        endpoints:
+          - nova-service
+  cinder-router:
+    offers:
+      cinder-database:
+        endpoints:
+          - database
