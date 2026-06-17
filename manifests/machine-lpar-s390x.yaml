@@ -29,8 +29,7 @@
 # infers the arch from the enrolled machine, so this same bundle deploys on s390x
 # and on amd64 (the dry-run target while s390x artifacts publish).
 machines:
-  "0":
-    base: ubuntu@24.04
+  "0": {}
 
 applications:
   sunbeam-machine:
@@ -42,7 +41,6 @@ applications:
   microceph:
     charm: microceph
     channel: squid/stable
-    base: ubuntu@24.04
     scale: 1
     to:
       - "0"
@@ -59,10 +57,6 @@ applications:
       - "0"
     options:
       snap-channel: 2026.1/edge
-    offers:
-      storage-backend:
-        endpoints:
-          - storage-backend
   cinder-microceph:
     charm: cinder-volume-ceph
     channel: 2026.1/edge
@@ -125,3 +119,11 @@ relations:
     - hypervisor:nova-service
   - - hypervisor:ceph-access
     - cinder-microceph:ceph-access
+
+---
+applications:
+  cinder-volume:
+    offers:
+      storage-backend:
+        endpoints:
+          - storage-backend

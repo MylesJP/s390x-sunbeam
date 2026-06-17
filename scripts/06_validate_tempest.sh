@@ -49,6 +49,8 @@ fi
 # 1. Required CLI tooling. python3-venv is on Ubuntu by default; pip we'll
 # use from inside the venv so no apt install is needed beyond it.
 log_step "ensuring python3-venv and openstack client are available"
+run_logged "apt update" -- sudo apt-get update || \
+    log "WARN: apt-get update failed; package installs may fail"
 if ! command -v python3 >/dev/null 2>&1; then
     log "FATAL: python3 missing"
     exit 1

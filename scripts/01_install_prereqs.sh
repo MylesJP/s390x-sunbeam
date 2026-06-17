@@ -44,6 +44,10 @@ log_step "diagnosing ${ARCH} availability for required snaps (records appended t
 "${SCRIPT_DIR}/../tools/check_snap_arch.sh" microceph            "${MICROCEPH_CHANNEL}"      "${ARCH}" || true
 "${SCRIPT_DIR}/../tools/check_snap_arch.sh" cinder-volume        "${CINDER_VOLUME_CHANNEL}"  "${ARCH}" || true
 
+log_step "refreshing apt package metadata"
+run_logged "apt update" -- sudo apt-get update || \
+    log "WARN: apt-get update failed; package installs may fail"
+
 log_step "ensuring skopeo is installed for OCI introspection"
 if ! command -v skopeo >/dev/null 2>&1; then
     run_logged "apt install skopeo" -- sudo apt-get install -y skopeo || \
