@@ -19,7 +19,15 @@ CONTROLLER="${JUJU_CONTROLLER:-sunbeam-controller}"
 K8S_MODEL="${K8S_MODEL:-openstack}"
 MACHINE_MODEL="${MACHINE_MODEL:-machines}"
 MANUAL_CLOUD="${MANUAL_CLOUD:-lpar-manual}"
-BUNDLE="${REPO_ROOT}/manifests/machine-lpar-s390x.yaml"
+# Charm source: 'charmhub' (default) or 'local' (our s390x .charm builds from
+# ./charms, via the *-local.yaml bundle). Explicit BUNDLE=... override still wins.
+CHARM_SOURCE="${CHARM_SOURCE:-charmhub}"
+case "${CHARM_SOURCE}" in
+    charmhub) _m_bundle="machine-lpar-s390x.yaml" ;;
+    local)    _m_bundle="machine-lpar-s390x-local.yaml" ;;
+    *) log "FATAL: CHARM_SOURCE must be 'charmhub' or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
+esac
+BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_m_bundle}}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
 
 if [[ ! -r "${BUNDLE}" ]]; then
@@ -94,7 +102,10 @@ fi
 
 # 4. Deploy the machine bundle. Its saas: block consumes the control-plane offers
 #    (admin/${K8S_MODEL}.*) created in phase 03.
-log_step "deploying machine bundle into ${MACHINE_MODEL}"
+log_step "deploying machine bundle (source=${CHARM_SOURCE}) into ${MACHINE_MODEL}: ${BUNDLE}"
+# Deploy from the repo root so a 'local' bundle's `charm: ./charms/...` paths
+# resolve (harmless for the charmhub bundle, which uses an absolute path).
+cd "${REPO_ROOT}"
 rc=0
 run_logged "juju deploy machine bundle" -- \
     juju deploy -m "${CONTROLLER}:${MACHINE_MODEL}" "${BUNDLE}" \

@@ -156,6 +156,37 @@ always get a post-mortem tarball.
 > retired CLI path; it's kept only as a channel-pin reference. The live channel pins
 > now live in the two bundle files.
 
+## Charm source: charmhub or local
+
+Phases 03/03b deploy the same topology from one of two sources, selected by
+`CHARM_SOURCE`:
+
+- **`charmhub`** (default) — published charms on their `2026.1/edge` (etc.)
+  channels, OCI images omitted so Juju pulls each revision's image. This is the
+  diagnostic mode that surfaces per-image s390x gaps. Bundles:
+  `manifests/control-plane-k8s-s390x.yaml`, `manifests/machine-lpar-s390x.yaml`.
+- **`local`** — the Sunbeam charms we build for s390x, deployed from
+  `./charms/*_s390x.charm` with their workload OCI images pinned to s390x rocks.
+  This actually exercises our builds on the modified K8s substrate. Bundles:
+  `manifests/control-plane-k8s-s390x-local.yaml`,
+  `manifests/machine-lpar-s390x-local.yaml`. External dependencies we do **not**
+  build (`mysql-k8s`, `rabbitmq-k8s`, `self-signed-certificates`, `traefik-k8s`,
+  `mysql-router-k8s`, `microceph`) stay on charmhub in both modes.
+
+```bash
+# diagnostic, published charms (default)
+./run.sh 03 && ./run.sh 03b
+# our s390x builds
+CHARM_SOURCE=local ./run.sh 03 && CHARM_SOURCE=local ./run.sh 03b
+```
+
+For `local`: first stage the `.charm` files in `charms/` (see
+[charms/README.md](charms/README.md)) and replace the `REPLACE-ME/...:s390x`
+resource placeholders in `control-plane-k8s-s390x-local.yaml` with real s390x rock
+refs. Heads-up: the external charmhub charms above still need their own s390x
+images — check with `tools/check_oci_arch.sh` first, as a missing one there will
+stall the deploy regardless of our charms.
+
 ## Useful environment overrides
 
 | Variable | Default | Used by |
@@ -166,6 +197,8 @@ always get a post-mortem tarball.
 | `K8S_CHANNEL` | `latest/edge` | 01/02b |
 | `JUJU_CHANNEL` | `3/stable` | 01 |
 | `JUJU_CONTROLLER` / `K8S_MODEL` / `MACHINE_MODEL` / `MANUAL_CLOUD` | `sunbeam-controller` / `openstack` / `machines` / `lpar-manual` | 03/03b/04/05/06 |
+| `CHARM_SOURCE` | `charmhub` | 03/03b — `charmhub` deploys published charms, `local` deploys our s390x `.charm` builds (see "Charm source") |
+| `BUNDLE` | per-phase `*-s390x.yaml` | 03/03b — explicit bundle path; overrides `CHARM_SOURCE` |
 | `DEPLOY_TIMEOUT` | `3600` | 03/03b settle wait |
 | `EXT_NET_NAME` / `EXT_SUBNET_RANGE` / `EXT_SUBNET_GW` / `EXT_SUBNET_POOL` / `EXT_PHYSNET` | external-network / 172.16.2.0/24 / .1 / .50-.200 / physnet1 | 04 |
 | `IMAGE_URL` | noble s390x cloud image | 04 |

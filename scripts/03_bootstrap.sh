@@ -18,7 +18,16 @@ phase_skip_if_done "${PHASE}" && exit 0
 K8S_CLOUD="${K8S_CLOUD:-sunbeam-k8s}"
 CONTROLLER="${JUJU_CONTROLLER:-sunbeam-controller}"
 K8S_MODEL="${K8S_MODEL:-openstack}"
-BUNDLE="${REPO_ROOT}/manifests/control-plane-k8s-s390x.yaml"
+# Charm source: 'charmhub' (default) deploys published charms; 'local' deploys our
+# s390x .charm builds from ./charms with s390x rock images pinned, via the
+# *-local.yaml bundle. An explicit BUNDLE=... override still wins.
+CHARM_SOURCE="${CHARM_SOURCE:-charmhub}"
+case "${CHARM_SOURCE}" in
+    charmhub) _cp_bundle="control-plane-k8s-s390x.yaml" ;;
+    local)    _cp_bundle="control-plane-k8s-s390x-local.yaml" ;;
+    *) log "FATAL: CHARM_SOURCE must be 'charmhub' or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
+esac
+BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_cp_bundle}}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
 
 if [[ ! -r "${BUNDLE}" ]]; then
@@ -75,7 +84,10 @@ else
 fi
 
 # 4. Deploy the control-plane bundle (exports the cross-model offers).
-log_step "deploying control-plane bundle into ${K8S_MODEL}"
+log_step "deploying control-plane bundle (source=${CHARM_SOURCE}) into ${K8S_MODEL}: ${BUNDLE}"
+# Deploy from the repo root so a 'local' bundle's `charm: ./charms/...` paths
+# resolve (harmless for the charmhub bundle, which uses an absolute path).
+cd "${REPO_ROOT}"
 rc=0
 run_logged "juju deploy control-plane bundle" -- \
     juju deploy -m "${CONTROLLER}:${K8S_MODEL}" "${BUNDLE}" --trust || rc=$?

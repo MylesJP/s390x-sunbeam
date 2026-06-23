@@ -170,5 +170,69 @@ else
     arch_report_append k8s-smoke k8s-smoke ubuntu "no (${ARCH})" "kubectl run failed"
 fi
 
+# 6. Substrate readiness for the OpenStack control plane. The k8s charms need a
+#    default StorageClass that actually binds PVCs (keystone fernet/credential
+#    keys, glance image store, ovn db filesystems) and the load-balancer addon to
+#    hand out external IPs (traefik). Verify both now -- best-effort -- so a phase
+#    03 stall can be told apart from a substrate gap. Recorded to arch_report.md.
+log_step "substrate check: default StorageClass binds a PVC"
+default_sc=$(sudo k8s kubectl get sc \
+    -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
+    2>/dev/null || true)
+log "default StorageClass: ${default_sc:-<none>}"
+sudo k8s kubectl delete pvc k8s-substrate-pvc --ignore-not-found >/dev/null 2>&1 || true
+cat <<'EOF' | sudo k8s kubectl apply -f - 2>&1 | tee -a "${PHASE_LOG}" || true
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: k8s-substrate-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 64Mi
+EOF
+if sudo k8s kubectl wait --for=jsonpath='{.status.phase}'=Bound \
+        pvc/k8s-substrate-pvc --timeout=120s 2>&1 | tee -a "${PHASE_LOG}"; then
+    log "PVC bound -- local-storage provisioning works"
+    arch_report_append k8s-substrate storage "${default_sc:-local-storage}" "yes (${ARCH})" "test PVC bound"
+else
+    log "WARN: PVC did not bind -- control-plane storage (keystone/glance/ovn) will stall"
+    sudo k8s kubectl describe pvc k8s-substrate-pvc 2>&1 | tee -a "${PHASE_LOG}" || true
+    arch_report_append k8s-substrate storage "${default_sc:-local-storage}" "no (${ARCH})" "test PVC stuck Pending -- see phase log"
+fi
+sudo k8s kubectl delete pvc k8s-substrate-pvc --ignore-not-found >/dev/null 2>&1 || true
+
+log_step "substrate check: load-balancer assigns an external IP"
+sudo k8s kubectl delete svc k8s-substrate-lb --ignore-not-found >/dev/null 2>&1 || true
+cat <<'EOF' | sudo k8s kubectl apply -f - 2>&1 | tee -a "${PHASE_LOG}" || true
+apiVersion: v1
+kind: Service
+metadata:
+  name: k8s-substrate-lb
+spec:
+  type: LoadBalancer
+  selector:
+    app: k8s-substrate-lb-unbacked
+  ports:
+    - port: 80
+      targetPort: 80
+EOF
+lb_ip=""
+for _ in $(seq 1 20); do
+    lb_ip=$(sudo k8s kubectl get svc k8s-substrate-lb \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    [[ -n "${lb_ip}" ]] && break
+    sleep 3
+done
+if [[ -n "${lb_ip}" ]]; then
+    log "load-balancer assigned ${lb_ip} -- traefik will get an external IP"
+    arch_report_append k8s-substrate loadbalancer metallb "yes (${ARCH})" "assigned ${lb_ip}"
+else
+    log "WARN: no external IP assigned within 60s -- traefik ingress will stay pending (see README Load-balancer)"
+    arch_report_append k8s-substrate loadbalancer metallb "no (${ARCH})" "no ingress IP within 60s"
+fi
+sudo k8s kubectl delete svc k8s-substrate-lb --ignore-not-found >/dev/null 2>&1 || true
+
 phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"
