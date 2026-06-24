@@ -85,6 +85,16 @@ else
         juju add-model "${MACHINE_MODEL}" "${MANUAL_CLOUD}"
 fi
 
+if [[ -n "${PROXY_URL:-}" ]]; then
+    NO_PROXY_VAL="${NO_PROXY_DEFAULT:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"
+    run_logged "configure Juju proxy (${MACHINE_MODEL})" -- \
+        juju model-config -m "${CONTROLLER}:${MACHINE_MODEL}" \
+            "juju-http-proxy=${PROXY_URL}" "juju-https-proxy=${PROXY_URL}" \
+            "apt-http-proxy=${PROXY_URL}" "apt-https-proxy=${PROXY_URL}" \
+            "snap-http-proxy=${PROXY_URL}" "snap-https-proxy=${PROXY_URL}" \
+            "juju-no-proxy=${NO_PROXY_VAL}" "apt-no-proxy=${NO_PROXY_VAL}"
+fi
+
 # 3. Enrol this LPAR as machine 0 (manual provisioning over SSH). The first
 #    machine added to an empty model becomes "0", which the bundle targets.
 machine_count=$(juju machines -m "${CONTROLLER}:${MACHINE_MODEL}" --format=json 2>/dev/null \
@@ -114,6 +124,13 @@ if (( rc != 0 )); then
     log "WARN: juju deploy (machine) returned ${rc}. Phase 05 will still capture state."
     echo "${rc}" > "${ARTIFACT_DIR}/.status/${PHASE}.failed"
     exit "${rc}"
+fi
+
+if [[ -n "${EXTERNAL_BRIDGE_ADDRESS:-}" ]]; then
+    log_step "configuring routed provider bridge address ${EXTERNAL_BRIDGE_ADDRESS}"
+    run_logged "configure hypervisor external bridge" -- \
+        juju config -m "${CONTROLLER}:${MACHINE_MODEL}" hypervisor \
+            "external-bridge-address=${EXTERNAL_BRIDGE_ADDRESS}"
 fi
 
 # 5. Wire the reverse offer: cinder-volume (machine model) exports

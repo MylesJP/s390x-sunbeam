@@ -33,7 +33,8 @@ if [[ -z "${RUN_ID}" ]]; then
 fi
 export RUN_ID
 
-ARTIFACT_DIR="${REPO_ROOT}/artifacts/${RUN_ID}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-${REPO_ROOT}/artifacts}"
+ARTIFACT_DIR="${ARTIFACT_ROOT}/${RUN_ID}"
 mkdir -p "${ARTIFACT_DIR}/.status"
 export ARTIFACT_DIR
 
@@ -45,8 +46,9 @@ echo "artifact_dir=${ARTIFACT_DIR}"
 # precedes `02b_*` -- some locales treat `_` as a non-letter and would reverse
 # the order, which would run phase 02b before phase 02.
 shopt -s nullglob
+PHASES_DIR="${PHASES_DIR:-${REPO_ROOT}/scripts}"
 mapfile -t all_phases < <(
-    LC_ALL=C ls "${REPO_ROOT}"/scripts/[0-9][0-9]*.sh 2>/dev/null
+    LC_ALL=C ls "${PHASES_DIR}"/[0-9][0-9]*.sh 2>/dev/null
 )
 
 select_phases=()
@@ -70,21 +72,38 @@ fi
 # Phase 05 (capture) is special: if we're running 'all' and any earlier phase
 # fails, we still want to run 05 + 99 for the post-mortem.
 overall_rc=0
+capture_only=0
 for script in "${select_phases[@]}"; do
     base=$(basename "$script")
+    if (( capture_only )); then
+        case "${base}" in
+            05_capture_state.sh|99_collect_artifacts.sh) ;;
+            *)
+                echo ">>> ${base} skipped after blocking phase failure"
+                continue
+                ;;
+        esac
+    fi
     echo "================================================================"
     echo ">>> ${base}"
     echo "================================================================"
     rc=0
     bash "$script" || rc=$?
     if (( rc != 0 )); then
+        phase_name="${base%.sh}"
+        if [[ ! -f "${ARTIFACT_DIR}/.status/${phase_name}.failed" ]]; then
+            echo "${rc}" > "${ARTIFACT_DIR}/.status/${phase_name}.failed"
+        fi
         overall_rc="${rc}"
         echo "!!! ${base} returned ${rc}"
         # For 'all', continue into capture+collect so we still get artifacts.
         if [[ "${PHASE_ARG}" == "all" ]]; then
             case "${base}" in
                 05_capture_state.sh|99_collect_artifacts.sh) continue ;;
-                *) echo "continuing to 05/99 for post-mortem capture" ;;
+                *)
+                    capture_only=1
+                    echo "skipping dependent phases; continuing to 05/99 for post-mortem capture"
+                    ;;
             esac
         else
             exit "${rc}"

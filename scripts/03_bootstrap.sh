@@ -83,6 +83,23 @@ else
     run_logged "juju add-model ${K8S_MODEL}" -- juju add-model "${K8S_MODEL}" "${K8S_CLOUD}"
 fi
 
+# Juju resolves charms/resources from inside controller/model workers, so shell,
+# apt, snapd and containerd proxy setup alone is not sufficient. Configure both
+# the controller model and workload model when PROXY_URL is in use.
+if [[ -n "${PROXY_URL:-}" ]]; then
+    NO_PROXY_VAL="${NO_PROXY_DEFAULT:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"
+    proxy_settings=(
+        "juju-http-proxy=${PROXY_URL}" "juju-https-proxy=${PROXY_URL}"
+        "apt-http-proxy=${PROXY_URL}" "apt-https-proxy=${PROXY_URL}"
+        "snap-http-proxy=${PROXY_URL}" "snap-https-proxy=${PROXY_URL}"
+        "juju-no-proxy=${NO_PROXY_VAL}" "apt-no-proxy=${NO_PROXY_VAL}"
+    )
+    for model in controller "${K8S_MODEL}"; do
+        run_logged "configure Juju proxy (${model})" -- \
+            juju model-config -m "${CONTROLLER}:${model}" "${proxy_settings[@]}"
+    done
+fi
+
 # 4. Deploy the control-plane bundle (exports the cross-model offers).
 log_step "deploying control-plane bundle (source=${CHARM_SOURCE}) into ${K8S_MODEL}: ${BUNDLE}"
 # Deploy from the repo root so a 'local' bundle's `charm: ./charms/...` paths

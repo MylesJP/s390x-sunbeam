@@ -153,6 +153,23 @@ if (( NEEDS_S390X_CNI )); then
 fi
 echo "${LB_CIDR}" > "${ARTIFACT_DIR}/lb_cidr"
 
+# Wait for the stock CNI to remove its startup taint before running workload
+# checks. On a fresh amd64 bootstrap image pulls and BPF setup can take a few
+# minutes even after `k8s bootstrap` itself returns.
+log_step "waiting for the Kubernetes node and CNI to become Ready"
+if ! sudo k8s kubectl wait --for=condition=Ready node --all --timeout=300s \
+        2>&1 | tee -a "${PHASE_LOG}"; then
+    log "FATAL: Kubernetes node did not become Ready"
+    exit 1
+fi
+if (( ! NEEDS_S390X_CNI )); then
+    sudo k8s kubectl wait --for=condition=Ready pod -n kube-system \
+        -l k8s-app=cilium --timeout=300s 2>&1 | tee -a "${PHASE_LOG}" || {
+        log "FATAL: Cilium did not become Ready"
+        exit 1
+    }
+fi
+
 # 5. Smoke-test: schedule a pod and confirm it reaches Ready (CNI + image pull).
 log_step "smoke test: scheduling an ubuntu pod"
 sudo k8s kubectl delete pod k8s-smoke --ignore-not-found
@@ -180,6 +197,7 @@ default_sc=$(sudo k8s kubectl get sc \
     -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}' \
     2>/dev/null || true)
 log "default StorageClass: ${default_sc:-<none>}"
+sudo k8s kubectl delete pod k8s-substrate-storage --ignore-not-found >/dev/null 2>&1 || true
 sudo k8s kubectl delete pvc k8s-substrate-pvc --ignore-not-found >/dev/null 2>&1 || true
 cat <<'EOF' | sudo k8s kubectl apply -f - 2>&1 | tee -a "${PHASE_LOG}" || true
 apiVersion: v1
@@ -191,16 +209,38 @@ spec:
   resources:
     requests:
       storage: 64Mi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: k8s-substrate-storage
+spec:
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: ubuntu
+      command: ["sleep", "300"]
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: k8s-substrate-pvc
 EOF
 if sudo k8s kubectl wait --for=jsonpath='{.status.phase}'=Bound \
-        pvc/k8s-substrate-pvc --timeout=120s 2>&1 | tee -a "${PHASE_LOG}"; then
-    log "PVC bound -- local-storage provisioning works"
-    arch_report_append k8s-substrate storage "${default_sc:-local-storage}" "yes (${ARCH})" "test PVC bound"
+        pvc/k8s-substrate-pvc --timeout=180s 2>&1 | tee -a "${PHASE_LOG}" \
+        && sudo k8s kubectl wait --for=condition=Ready pod/k8s-substrate-storage \
+            --timeout=180s 2>&1 | tee -a "${PHASE_LOG}"; then
+    log "PVC bound and consumer pod is Ready -- local-storage provisioning works"
+    arch_report_append k8s-substrate storage "${default_sc:-local-storage}" "yes (${ARCH})" "test PVC bound; consumer Ready"
 else
-    log "WARN: PVC did not bind -- control-plane storage (keystone/glance/ovn) will stall"
+    log "WARN: PVC/consumer did not become ready -- control-plane storage (keystone/glance/ovn) will stall"
     sudo k8s kubectl describe pvc k8s-substrate-pvc 2>&1 | tee -a "${PHASE_LOG}" || true
-    arch_report_append k8s-substrate storage "${default_sc:-local-storage}" "no (${ARCH})" "test PVC stuck Pending -- see phase log"
+    sudo k8s kubectl describe pod k8s-substrate-storage 2>&1 | tee -a "${PHASE_LOG}" || true
+    arch_report_append k8s-substrate storage "${default_sc:-local-storage}" "no (${ARCH})" "PVC/consumer not ready -- see phase log"
 fi
+sudo k8s kubectl delete pod k8s-substrate-storage --ignore-not-found >/dev/null 2>&1 || true
 sudo k8s kubectl delete pvc k8s-substrate-pvc --ignore-not-found >/dev/null 2>&1 || true
 
 log_step "substrate check: load-balancer assigns an external IP"

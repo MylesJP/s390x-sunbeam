@@ -29,16 +29,21 @@ fi
 ARCH="$(target_arch)"
 # kvm_intel/kvm_amd are amd64-only; kvm is the generic base (and the s390x KVM
 # module). modprobe is best-effort -- missing/builtin modules are fine.
-log_step "loading kernel modules (overlay, br_netfilter, vhost_vsock, kvm + vendor)"
-for mod in overlay br_netfilter vhost_vsock kvm kvm_intel kvm_amd; do
+log_step "loading kernel modules (containers, CNI/netfilter, KVM + vendor)"
+for mod in overlay loop dm_mod bridge br_netfilter 8021q veth vxlan netlink_diag \
+           nf_tables nf_nat nf_conntrack nf_conntrack_netlink \
+           ip_tables iptable_nat iptable_filter ip_set ip_set_hash_ip \
+           ip_set_hash_net ip_vs ip_vs_rr ip_vs_wrr ip_vs_sh \
+           xt_socket xt_mark xt_connmark xt_CT xfrm_user \
+           sch_ingress cls_bpf act_bpf vhost_vsock kvm kvm_intel kvm_amd; do
     sudo modprobe "${mod}" 2>>"${PHASE_LOG}" || log "note: modprobe ${mod} skipped (builtin/unavailable on ${ARCH})"
 done
 
 if [[ -e /dev/kvm ]]; then
-    log "OK: /dev/kvm present -- nova can launch instances on this LPAR"
+    log "OK: /dev/kvm present -- nova can launch instances on this host"
     arch_report_append host /dev/kvm n/a yes "present"
 else
-    log "WARN: /dev/kvm absent -- nova boot/scenario Tempest tests will fail. Enable s390x KVM on this LPAR."
+    log "WARN: /dev/kvm absent -- nova boot/scenario Tempest tests will fail. Enable nested virtualization on amd64 or SIE/KVM on s390x."
     arch_report_append host /dev/kvm n/a no "absent -- no hardware-accelerated instances"
 fi
 

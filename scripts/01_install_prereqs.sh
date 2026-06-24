@@ -48,16 +48,15 @@ log_step "refreshing apt package metadata"
 run_logged "apt update" -- sudo apt-get update || \
     log "WARN: apt-get update failed; package installs may fail"
 
-log_step "ensuring skopeo is installed for OCI introspection"
-if ! command -v skopeo >/dev/null 2>&1; then
-    run_logged "apt install skopeo" -- sudo apt-get install -y skopeo || \
-        log "WARN: skopeo install failed; OCI arch checks will be marked unknown"
-fi
-
-log_step "ensuring jq is installed (parsing juju action output in phase 04)"
-if ! command -v jq >/dev/null 2>&1; then
-    run_logged "apt install jq" -- sudo apt-get install -y jq || \
-        log "WARN: jq install failed; phase 04 openrc extraction will fall back to yaml"
+log_step "installing workflow prerequisites"
+prereq_packages=(
+    ca-certificates curl git jq openssh-client openssh-server
+    python3 python3-venv python3-yaml skopeo tox zstd
+)
+if ! run_logged "apt install workflow prerequisites" -- \
+        sudo apt-get install -y "${prereq_packages[@]}"; then
+    log "FATAL: failed to install one or more workflow prerequisites"
+    exit 1
 fi
 
 log_step "installing juju snap from ${JUJU_CHANNEL}"
@@ -71,6 +70,8 @@ else
         exit 1
     fi
 fi
+
+"${SCRIPT_DIR}/../tools/preflight.sh"
 
 phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"

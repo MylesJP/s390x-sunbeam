@@ -194,6 +194,8 @@ relations:
     - nova:identity-service
   - - traefik:ingress
     - nova:ingress-internal
+  - - traefik:ingress
+    - nova:ingress-metadata
   - - traefik:traefik-route
     - nova:traefik-route-internal
   - - keystone:send-ca-cert

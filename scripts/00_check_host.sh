@@ -86,7 +86,7 @@ if (( mem_kb < 16 * 1024 * 1024 )); then
 fi
 
 if [[ ! -e /dev/kvm ]]; then
-    log "WARN: /dev/kvm missing. KVM on Z requires LPAR with SIE enabled and kvm modules loaded; Nova will not be able to launch instances."
+    log "WARN: /dev/kvm missing. Enable nested virtualization on amd64 or SIE/KVM on s390x; Nova will not be able to launch instances."
 fi
 
 phase_done "${PHASE}"
