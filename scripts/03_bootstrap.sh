@@ -18,7 +18,16 @@ phase_skip_if_done "${PHASE}" && exit 0
 K8S_CLOUD="${K8S_CLOUD:-sunbeam-k8s}"
 CONTROLLER="${JUJU_CONTROLLER:-sunbeam-controller}"
 K8S_MODEL="${K8S_MODEL:-openstack}"
-BUNDLE="${REPO_ROOT}/manifests/control-plane-k8s-s390x.yaml"
+# Charm source: 'charmhub' (default) deploys published charms; 'local' deploys our
+# s390x .charm builds from ./charms with s390x rock images pinned, via the
+# *-local.yaml bundle. An explicit BUNDLE=... override still wins.
+CHARM_SOURCE="${CHARM_SOURCE:-charmhub}"
+case "${CHARM_SOURCE}" in
+    charmhub) _cp_bundle="control-plane-k8s-s390x.yaml" ;;
+    local)    _cp_bundle="control-plane-k8s-s390x-local.yaml" ;;
+    *) log "FATAL: CHARM_SOURCE must be 'charmhub' or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
+esac
+BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_cp_bundle}}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
 
 if [[ ! -r "${BUNDLE}" ]]; then
@@ -74,8 +83,28 @@ else
     run_logged "juju add-model ${K8S_MODEL}" -- juju add-model "${K8S_MODEL}" "${K8S_CLOUD}"
 fi
 
+# Juju resolves charms/resources from inside controller/model workers, so shell,
+# apt, snapd and containerd proxy setup alone is not sufficient. Configure both
+# the controller model and workload model when PROXY_URL is in use.
+if [[ -n "${PROXY_URL:-}" ]]; then
+    NO_PROXY_VAL="${NO_PROXY_DEFAULT:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"
+    proxy_settings=(
+        "juju-http-proxy=${PROXY_URL}" "juju-https-proxy=${PROXY_URL}"
+        "apt-http-proxy=${PROXY_URL}" "apt-https-proxy=${PROXY_URL}"
+        "snap-http-proxy=${PROXY_URL}" "snap-https-proxy=${PROXY_URL}"
+        "juju-no-proxy=${NO_PROXY_VAL}" "apt-no-proxy=${NO_PROXY_VAL}"
+    )
+    for model in controller "${K8S_MODEL}"; do
+        run_logged "configure Juju proxy (${model})" -- \
+            juju model-config -m "${CONTROLLER}:${model}" "${proxy_settings[@]}"
+    done
+fi
+
 # 4. Deploy the control-plane bundle (exports the cross-model offers).
-log_step "deploying control-plane bundle into ${K8S_MODEL}"
+log_step "deploying control-plane bundle (source=${CHARM_SOURCE}) into ${K8S_MODEL}: ${BUNDLE}"
+# Deploy from the repo root so a 'local' bundle's `charm: ./charms/...` paths
+# resolve (harmless for the charmhub bundle, which uses an absolute path).
+cd "${REPO_ROOT}"
 rc=0
 run_logged "juju deploy control-plane bundle" -- \
     juju deploy -m "${CONTROLLER}:${K8S_MODEL}" "${BUNDLE}" --trust || rc=$?

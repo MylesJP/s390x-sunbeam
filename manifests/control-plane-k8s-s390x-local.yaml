@@ -1,30 +1,49 @@
-# Sunbeam CORE control-plane bundle for single-LPAR s390x verification.
+# Sunbeam CORE control-plane bundle — LOCAL-CHARM variant for s390x.
 #
-# Hand-rolled equivalent of snap-openstack's `deploy-openstack` Terraform plan,
-# derived verbatim from the upstream zaza functional-test bundle
-# sunbeam-charms/tests/openstack/smoke.yaml.j2 with every feature charm removed
-# (no horizon/heat/octavia/magnum/manila/barbican/designate/ironic/telemetry/
-# images-sync/ldap, and no in-bundle tempest-k8s -- tempest-k8s has no s390x OCI
-# image so Tempest runs via upstream tox in phase 06 instead).
+# Same topology, relations and cross-model offers as
+# manifests/control-plane-k8s-s390x.yaml, but the charms WE build for s390x are
+# deployed from local ./charms/<name>_s390x.charm paths with their workload OCI
+# images pinned to s390x rocks, instead of pulled from charmhub. Use it via:
 #
-# This is the K8s half of a two-model deployment. Deploy it into the `openstack`
-# CAAS model on the Canonical K8s cloud:
+#   CHARM_SOURCE=local ./run.sh 03
+#   # or directly:
+#   juju deploy -m sunbeam-controller:openstack \
+#       ./manifests/control-plane-k8s-s390x-local.yaml --trust
 #
-#   juju add-model openstack <k8s-cloud>
-#   juju deploy ./control-plane-k8s-s390x.yaml --trust
+# Deploy is run with cwd = repo root, so the `charm: ./charms/...` paths resolve.
+# Stage the .charm files there first (see charms/README.md).
 #
-# It EXPORTS the cross-model offers (amqp, identity-*, send-ca-cert, ovsdb-cms,
-# certificates, nova-service, cinder-database) that the machine-plane bundle
-# (machine-lpar-s390x.yaml) consumes for the hypervisor + cinder-volume +
-# microceph. It also requires the `storage-backend` offer that the machine bundle
-# exports back -- phase 03b wires that one up after both models exist.
+# ─── what is local vs charmhub ───────────────────────────────────────────────
+# LOCAL  (our s390x builds): ovn-central, ovn-relay, keystone, glance, placement,
+#        nova, neutron, cinder.
+# CHARMHUB (external deps we do not build): mysql (mysql-k8s), rabbitmq
+#        (rabbitmq-k8s), tls-operator (self-signed-certificates), traefik
+#        (traefik-k8s), cinder-router (mysql-router-k8s). These still pull their
+#        own images from charmhub and therefore need their OWN s390x builds —
+#        check with tools/check_oci_arch.sh before relying on this.
 #
-# Channels match manifests/sunbeam-2026.1-s390x.yaml. Resources are intentionally
-# omitted: deploying from charmhub makes Juju pull each revision's published OCI
-# image, which is exactly how phase 05 surfaces the per-image s390x gaps.
+# ─── s390x rock image refs — REPLACE the placeholders below ──────────────────
+# Each `resources:` value must point at an s390x build of the workload image.
+# Replace every `REPLACE-ME/...:s390x` with the real rock ref from the rocks work.
+# Resources required, per charm:
+#   keystone-k8s     : keystone-image
+#   glance-k8s       : glance-api-image
+#   placement-k8s    : placement-api-image
+#   neutron-k8s      : neutron-server-image
+#   nova-k8s         : nova-api-image, nova-scheduler-image,
+#                      nova-conductor-image, nova-spiceproxy-image
+#   cinder-k8s       : cinder-api-image, cinder-scheduler-image
+#   ovn-central-k8s  : ovn-sb-db-server-image, ovn-nb-db-server-image,
+#                      ovn-northd-image
+#   ovn-relay-k8s    : ovn-sb-db-server-image
+#
+# NOTE: the `relations:` and the trailing `offers:` document below are copied
+# VERBATIM from control-plane-k8s-s390x.yaml. If you change wiring in one file,
+# change it in the other — they are kept in sync by hand.
 bundle: kubernetes
 
 applications:
+  # ── charmhub (external dependencies) ──
   mysql:
     charm: mysql-k8s
     channel: 8.0/stable
@@ -55,61 +74,8 @@ applications:
     base: ubuntu@20.04
     scale: 1
     trust: true
-    # NOTE: this annotation targets MetalLB. The Canonical K8s load-balancer
-    # addon configured in phase 02b may not honour it; if traefik stays pending
-    # without an external IP, drop this option or match the addon's pool name.
-    # See README "Load-balancer".
     options:
       kubernetes-service-annotations: metallb.universe.tf/address-pool=public
-  ovn-central:
-    charm: ovn-central-k8s
-    channel: 26.03/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-  ovn-relay:
-    charm: ovn-relay-k8s
-    channel: 26.03/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-  keystone:
-    charm: keystone-k8s
-    channel: 2026.1/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-    storage:
-      fernet-keys: 5M
-      credential-keys: 5M
-  glance:
-    charm: glance-k8s
-    channel: 2026.1/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-    storage:
-      local-repository: 10G
-  placement:
-    charm: placement-k8s
-    channel: 2026.1/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-  nova:
-    charm: nova-k8s
-    channel: 2026.1/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-  neutron:
-    charm: neutron-k8s
-    channel: 2026.1/edge
-    base: ubuntu@24.04
-    scale: 1
-    trust: true
-    options:
-      debug: true
   cinder-router:
     charm: mysql-router-k8s
     channel: 8.0/edge
@@ -118,12 +84,77 @@ applications:
     trust: true
     options:
       expose-external: loadbalancer
-  cinder:
-    charm: cinder-k8s
-    channel: 2026.1/edge
+
+  # ── local s390x builds ──
+  ovn-central:
+    charm: ./charms/ovn-central-k8s_s390x.charm
     base: ubuntu@24.04
     scale: 1
     trust: true
+    resources:
+      ovn-sb-db-server-image: REPLACE-ME/ovn-sb-db-server:s390x
+      ovn-nb-db-server-image: REPLACE-ME/ovn-nb-db-server:s390x
+      ovn-northd-image: REPLACE-ME/ovn-northd:s390x
+  ovn-relay:
+    charm: ./charms/ovn-relay-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    resources:
+      ovn-sb-db-server-image: REPLACE-ME/ovn-sb-db-server:s390x
+  keystone:
+    charm: ./charms/keystone-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    storage:
+      fernet-keys: 5M
+      credential-keys: 5M
+    resources:
+      keystone-image: REPLACE-ME/keystone-consolidated:s390x
+  glance:
+    charm: ./charms/glance-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    storage:
+      local-repository: 10G
+    resources:
+      glance-api-image: REPLACE-ME/glance-api:s390x
+  placement:
+    charm: ./charms/placement-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    resources:
+      placement-api-image: REPLACE-ME/placement-api:s390x
+  nova:
+    charm: ./charms/nova-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    resources:
+      nova-api-image: REPLACE-ME/nova-api:s390x
+      nova-scheduler-image: REPLACE-ME/nova-scheduler:s390x
+      nova-conductor-image: REPLACE-ME/nova-conductor:s390x
+      nova-spiceproxy-image: REPLACE-ME/nova-spiceproxy:s390x
+  neutron:
+    charm: ./charms/neutron-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    options:
+      debug: true
+    resources:
+      neutron-server-image: REPLACE-ME/neutron-server:s390x
+  cinder:
+    charm: ./charms/cinder-k8s_s390x.charm
+    base: ubuntu@24.04
+    scale: 1
+    trust: true
+    resources:
+      cinder-api-image: REPLACE-ME/cinder-api:s390x
+      cinder-scheduler-image: REPLACE-ME/cinder-scheduler:s390x
 
 relations:
   - - tls-operator:certificates

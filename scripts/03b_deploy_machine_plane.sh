@@ -19,7 +19,15 @@ CONTROLLER="${JUJU_CONTROLLER:-sunbeam-controller}"
 K8S_MODEL="${K8S_MODEL:-openstack}"
 MACHINE_MODEL="${MACHINE_MODEL:-machines}"
 MANUAL_CLOUD="${MANUAL_CLOUD:-lpar-manual}"
-BUNDLE="${REPO_ROOT}/manifests/machine-lpar-s390x.yaml"
+# Charm source: 'charmhub' (default) or 'local' (our s390x .charm builds from
+# ./charms, via the *-local.yaml bundle). Explicit BUNDLE=... override still wins.
+CHARM_SOURCE="${CHARM_SOURCE:-charmhub}"
+case "${CHARM_SOURCE}" in
+    charmhub) _m_bundle="machine-lpar-s390x.yaml" ;;
+    local)    _m_bundle="machine-lpar-s390x-local.yaml" ;;
+    *) log "FATAL: CHARM_SOURCE must be 'charmhub' or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
+esac
+BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_m_bundle}}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
 
 if [[ ! -r "${BUNDLE}" ]]; then
@@ -77,6 +85,16 @@ else
         juju add-model "${MACHINE_MODEL}" "${MANUAL_CLOUD}"
 fi
 
+if [[ -n "${PROXY_URL:-}" ]]; then
+    NO_PROXY_VAL="${NO_PROXY_DEFAULT:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"
+    run_logged "configure Juju proxy (${MACHINE_MODEL})" -- \
+        juju model-config -m "${CONTROLLER}:${MACHINE_MODEL}" \
+            "juju-http-proxy=${PROXY_URL}" "juju-https-proxy=${PROXY_URL}" \
+            "apt-http-proxy=${PROXY_URL}" "apt-https-proxy=${PROXY_URL}" \
+            "snap-http-proxy=${PROXY_URL}" "snap-https-proxy=${PROXY_URL}" \
+            "juju-no-proxy=${NO_PROXY_VAL}" "apt-no-proxy=${NO_PROXY_VAL}"
+fi
+
 # 3. Enrol this LPAR as machine 0 (manual provisioning over SSH). The first
 #    machine added to an empty model becomes "0", which the bundle targets.
 machine_count=$(juju machines -m "${CONTROLLER}:${MACHINE_MODEL}" --format=json 2>/dev/null \
@@ -94,7 +112,10 @@ fi
 
 # 4. Deploy the machine bundle. Its saas: block consumes the control-plane offers
 #    (admin/${K8S_MODEL}.*) created in phase 03.
-log_step "deploying machine bundle into ${MACHINE_MODEL}"
+log_step "deploying machine bundle (source=${CHARM_SOURCE}) into ${MACHINE_MODEL}: ${BUNDLE}"
+# Deploy from the repo root so a 'local' bundle's `charm: ./charms/...` paths
+# resolve (harmless for the charmhub bundle, which uses an absolute path).
+cd "${REPO_ROOT}"
 rc=0
 run_logged "juju deploy machine bundle" -- \
     juju deploy -m "${CONTROLLER}:${MACHINE_MODEL}" "${BUNDLE}" \
@@ -103,6 +124,13 @@ if (( rc != 0 )); then
     log "WARN: juju deploy (machine) returned ${rc}. Phase 05 will still capture state."
     echo "${rc}" > "${ARTIFACT_DIR}/.status/${PHASE}.failed"
     exit "${rc}"
+fi
+
+if [[ -n "${EXTERNAL_BRIDGE_ADDRESS:-}" ]]; then
+    log_step "configuring routed provider bridge address ${EXTERNAL_BRIDGE_ADDRESS}"
+    run_logged "configure hypervisor external bridge" -- \
+        juju config -m "${CONTROLLER}:${MACHINE_MODEL}" hypervisor \
+            "external-bridge-address=${EXTERNAL_BRIDGE_ADDRESS}"
 fi
 
 # 5. Wire the reverse offer: cinder-volume (machine model) exports

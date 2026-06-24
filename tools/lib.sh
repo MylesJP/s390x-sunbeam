@@ -51,6 +51,7 @@ require_cmd() {
 
 phase_done() {
     local phase="$1"
+    rm -f "${PHASE_STATUS_DIR}/${phase}.failed"
     touch "${PHASE_STATUS_DIR}/${phase}.done"
 }
 
@@ -73,6 +74,9 @@ init_phase() {
     local phase="$1"
     PHASE_LOG="${ARTIFACT_DIR}/phase_${phase}.log"
     export PHASE_LOG
+    if phase_is_done "${phase}"; then
+        return 0
+    fi
     : > "${PHASE_LOG}"
     log_step "phase ${phase} start"
 }

@@ -76,6 +76,7 @@ if [[ ! -x "${venv}/bin/discover-tempest-config" ]]; then
     "${venv}/bin/pip" install --upgrade pip
     "${venv}/bin/pip" install python-tempestconf python-openstackclient
 fi
+OSC="${venv}/bin/openstack"
 
 # 4. Generate tempest.conf with python-tempestconf, against the live cloud.
 # discover-tempest-config talks to keystone/nova/glance/neutron via the
@@ -91,9 +92,42 @@ log_step "generating tempest.conf via python-tempestconf"
         --debug \
         --create \
         --image "${TEMPEST_IMAGE_URL}" \
-        --network-id "$(openstack network show external-network -f value -c id 2>/dev/null || true)"
+        --network-id "$("${OSC}" network show external-network -f value -c id 2>/dev/null || true)"
 ) 2>&1 | tee "${TEMPEST_DIR}/tempestconf.log" || \
     log "WARN: discover-tempest-config returned non-zero; check ${TEMPEST_DIR}/tempestconf.log"
+
+# python-tempestconf defaults to 1 GiB test flavors and volumes. Ubuntu Noble's
+# cloud image has a 3.5 GiB virtual size, so those defaults make every
+# server/boot-from-volume smoke test fail before it reaches the hypervisor.
+# Reuse the phase-04 flavors and size test volumes to fit the selected image.
+log_step "sizing Tempest resources for the guest image"
+(
+    # shellcheck disable=SC1090
+    source "${OPENRC}"
+    flavor_ref=$("${OSC}" flavor show m1.tiny -f value -c id)
+    flavor_ref_alt=$("${OSC}" flavor show m1.small -f value -c id)
+    "${venv}/bin/python" - \
+        "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
+        "${flavor_ref}" "${flavor_ref_alt}" \
+        "${TEMPEST_VOLUME_SIZE_GB:-4}" \
+        "${TEMPEST_IMAGE_SSH_USER:-ubuntu}" <<'PY'
+import configparser
+import sys
+
+path, flavor_ref, flavor_ref_alt, volume_size, image_ssh_user = sys.argv[1:]
+config = configparser.RawConfigParser()
+config.read(path)
+for section in ("compute", "volume", "validation"):
+    if not config.has_section(section):
+        config.add_section(section)
+config.set("compute", "flavor_ref", flavor_ref)
+config.set("compute", "flavor_ref_alt", flavor_ref_alt)
+config.set("volume", "volume_size", volume_size)
+config.set("validation", "image_ssh_user", image_ssh_user)
+with open(path, "w", encoding="utf-8") as stream:
+    config.write(stream)
+PY
+)
 
 # 5. Drop in exclude-list and accounts (use upstream tempest's default accounts shape).
 if [[ -s "${EXCLUDE_LIST}" ]]; then
@@ -142,14 +176,14 @@ log_step "writing diagnostic dumps to ${REPORT_DIR}"
     # shellcheck disable=SC1090
     source "${OPENRC}"
     set +e
-    openstack catalog list                > "${REPORT_DIR}/catalog_list.txt"      2>&1
-    openstack endpoint list               > "${REPORT_DIR}/endpoint_list.txt"     2>&1
-    openstack image list                  > "${REPORT_DIR}/image_list.txt"        2>&1
-    openstack network list                > "${REPORT_DIR}/network_list.txt"      2>&1
-    openstack network agent list          > "${REPORT_DIR}/network_agent_list.txt" 2>&1
-    openstack hypervisor list             > "${REPORT_DIR}/hypervisor_list.txt"   2>&1
-    openstack server list --all-projects  > "${REPORT_DIR}/server_list.txt"       2>&1
-    openstack volume list --all-projects  > "${REPORT_DIR}/volume_list.txt"       2>&1
+    "${OSC}" catalog list                > "${REPORT_DIR}/catalog_list.txt"      2>&1
+    "${OSC}" endpoint list               > "${REPORT_DIR}/endpoint_list.txt"     2>&1
+    "${OSC}" image list                  > "${REPORT_DIR}/image_list.txt"        2>&1
+    "${OSC}" network list                > "${REPORT_DIR}/network_list.txt"      2>&1
+    "${OSC}" network agent list          > "${REPORT_DIR}/network_agent_list.txt" 2>&1
+    "${OSC}" hypervisor list             > "${REPORT_DIR}/hypervisor_list.txt"   2>&1
+    "${OSC}" server list --all-projects  > "${REPORT_DIR}/server_list.txt"       2>&1
+    "${OSC}" volume list --all-projects  > "${REPORT_DIR}/volume_list.txt"       2>&1
     _ctrl="${JUJU_CONTROLLER:-sunbeam-controller}"
     juju status -m "${_ctrl}:openstack" --format=yaml > "${REPORT_DIR}/juju_status_openstack.txt" 2>&1
     juju status -m "${_ctrl}:machines"  --format=yaml > "${REPORT_DIR}/juju_status_machines.txt"  2>&1
@@ -158,9 +192,10 @@ log_step "writing diagnostic dumps to ${REPORT_DIR}"
 if (( rc != 0 )); then
     log "tempest smoke returned ${rc}; see ${smoke_out} and ${failures}"
     echo "${rc}" > "${ARTIFACT_DIR}/.status/${PHASE}.failed"
+else
+    phase_done "${PHASE}"
 fi
 
-phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"
 log "NEXT: re-run any single failing test with:"
 log "  ./tools/run_tempest_test.sh '<test-regex>'"

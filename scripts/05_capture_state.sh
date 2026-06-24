@@ -26,7 +26,7 @@ mapfile -t MODELS < <(juju models --format=json 2>/dev/null \
 log_step "capturing juju state for models: ${MODELS[*]}"
 for m in "${MODELS[@]}"; do
     tgt="${CONTROLLER}:${m}"
-    juju export bundle -m "${tgt}" > "${ARTIFACT_DIR}/juju_bundle_${m}.yaml" 2>> "${PHASE_LOG}" || \
+    juju export-bundle -m "${tgt}" > "${ARTIFACT_DIR}/juju_bundle_${m}.yaml" 2>> "${PHASE_LOG}" || \
         log "WARN: juju export bundle (${m}) failed"
     juju status -m "${tgt}" --format=yaml > "${ARTIFACT_DIR}/juju_status_${m}.txt" 2>> "${PHASE_LOG}" || \
         log "WARN: juju status (${m}) failed"

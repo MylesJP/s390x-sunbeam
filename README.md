@@ -47,9 +47,9 @@ octavia, magnum, manila, barbican, designate, ironic, telemetry, object storage)
 **no `tempest-k8s`** in the bundle: that charm has no s390x OCI image, so Tempest runs
 via upstream `tox` (phase 06) instead.
 
-## Runs on amd64 too (dry-run)
+## Runs on amd64 too
 
-The whole workflow is arch-aware and also runs on **amd64**, so you can shake out
+The whole workflow is arch-aware and also runs on **amd64**, so you can validate
 the orchestration while s390x artifacts are still publishing. The deploy
 architecture is auto-detected (`dpkg --print-architecture`) and overridable with
 `TARGET_ARCH`. The only real difference is phase 02b:
@@ -60,7 +60,8 @@ architecture is auto-detected (`dpkg --print-architecture`) and overridable with
 - **amd64** — bootstraps stock Canonical K8s (cilium enabled), no Calico, no image
   rewrites.
 
-Everything else (juju bootstrap, the two bundles, configure, tempest) is identical;
+Everything else (juju bootstrap, the two bundles, configure, guest/volume smoke,
+tempest) is identical;
 the bundles carry no `arch:` constraints so Juju picks the right charm revisions,
 and phase 04 selects the matching Ubuntu cloud image (`...-cloudimg-<arch>.img`) and
 glance `architecture` property automatically. On amd64 the `arch_report.md` rows
@@ -69,7 +70,10 @@ actual LPAR.
 
 ## Prerequisites
 
-- Ubuntu 24.04 LTS (Noble) **or** 26.04 LTS (Resolute), on s390x **or** amd64.
+- Ubuntu 24.04 LTS (Noble), on s390x or amd64, for the complete two-model
+  workflow. The K8s/control-plane tooling also runs on 26.04, but the published
+  2026.1 machine-plane charms currently select Ubuntu 24.04 bases and cannot be
+  placed directly on a Resolute manual machine.
 - A user with passwordless `sudo` **and** key-based SSH back to the host (phase 02
   sets this up — it's needed to enrol the LPAR as a Juju manual machine).
 - Outbound internet (Snap Store, ghcr.io, docker.io, charmhub) — see "Behind a proxy".
@@ -101,7 +105,30 @@ cd s390x-sunbeam
 ```
 
 This creates `artifacts/<UTC-timestamp>/`, runs every phase in order, and on
-completion gives `artifacts/<run-id>/sunbeam-s390x-<run-id>.tar.zst`.
+completion gives two deliverables:
+
+- `sunbeam-<arch>-<run-id>.tar.zst` — complete diagnostic archive.
+- `test-share-<arch>-<run-id>.tar.zst` — compact, publishable validation report
+  modelled on the
+  [openstack-charmers/test-share s390x results](https://github.com/openstack-charmers/test-share/tree/master/s390x/2025-dec/noble-flamingo-ovn/multi-lpar).
+
+For a gated amd64 verification, reserve a free L2 address range and run:
+
+```bash
+LB_CIDR=10.0.0.240-10.0.0.250 ./tools/verify_amd64.sh
+```
+
+For a single-NIC nested VM, a routed provider bridge can use the repository's
+default external subnet:
+
+```bash
+LB_CIDR=10.0.0.240-10.0.0.250 \
+EXTERNAL_BRIDGE_ADDRESS=172.16.2.1/24 \
+./tools/verify_amd64.sh
+```
+
+The amd64 verifier requires `CHARM_SOURCE=charmhub`, stops at each failed gate,
+boots a guest, attaches a volume, runs Tempest, and checks phase idempotency.
 
 ### Running a single phase
 
@@ -120,19 +147,20 @@ re-run unless you delete the sentinel.
 
 | #   | Script                          | Does                                                                                  |
 |-----|---------------------------------|---------------------------------------------------------------------------------------|
-| 00  | `00_check_host.sh`              | Assert s390x + Ubuntu, dump env/network/KVM facts                                     |
-| 01  | `01_install_prereqs.sh`         | `snap install juju`; s390x arch check for juju/k8s/hypervisor/microceph/cinder-volume |
+| 00  | `00_check_host.sh`              | Assert target architecture + supported Ubuntu base; dump env/network/KVM facts         |
+| 01  | `01_install_prereqs.sh`         | Install prerequisites and Juju; check target-arch snaps and bundles                    |
 | 02  | `02_prepare_node.sh`            | Host prep (kernel modules, `/dev/kvm` check) + key-based SSH-to-self for manual cloud |
-| 02b | `02b_setup_s390x_cni.sh`        | Bootstrap K8s (cilium disabled), apply Calico, rewrite addon images, **configure LB pool** |
+| 02b | `02b_setup_s390x_cni.sh`        | Bootstrap Canonical K8s, validate networking/storage, and **configure LB pool**         |
 | 03  | `03_bootstrap.sh`               | `juju add-k8s` + `bootstrap` + `add-model openstack` + deploy control-plane bundle    |
 | 03b | `03b_deploy_machine_plane.sh`   | Manual cloud + `machines` model + enrol LPAR as machine 0 + deploy machine bundle + wire `storage-backend` |
 | 04  | `04_configure.sh`               | openrc via `keystone get-admin-account`; external network, flavors, s390x image (openstack CLI) |
+| 04b | `04b_smoke_cloud.sh`             | Boot a guest, attach a Cinder volume, assign a floating IP, and prove SSH access       |
 | 05  | `05_capture_state.sh`           | Per-model `juju export bundle`/`status`/`offers`, k8s dump, OCI/snap s390x sweep       |
 | 06  | `06_validate_tempest.sh`        | Upstream tempest: `discover-tempest-config` → `tempest.conf`, `tox -e smoke`, failures |
-| 99  | `99_collect_artifacts.sh`       | Tar everything into `sunbeam-s390x-<run-id>.tar.zst`, print summary                   |
+| 99  | `99_collect_artifacts.sh`       | Build full diagnostics plus a compact test-share-compatible report                    |
 
-In `./run.sh all` mode, a failure in 01–04 still proceeds through 05 + 99 so you
-always get a post-mortem tarball.
+In `./run.sh all` mode, a blocking failure skips dependent phases and proceeds
+directly to 05 + 99 so you always get a post-mortem tarball.
 
 ## Key files
 
@@ -150,11 +178,43 @@ always get a post-mortem tarball.
 - [tools/rewrite_k8s_addon_images.sh](tools/rewrite_k8s_addon_images.sh) — patch addon
   `ghcr.io/canonical/...` images to upstream registries with s390x builds
 - [tools/run_tempest_test.sh](tools/run_tempest_test.sh) — re-run a single tempest test
+- [tools/verify_amd64.sh](tools/verify_amd64.sh) — gated end-to-end amd64 verifier
 - [vendor/pe-ibm/](vendor/pe-ibm/), [vendor/zopenstack/](vendor/zopenstack/) — pinned snapshots
 
 > The old `manifests/sunbeam-2026.1-s390x.yaml` was a *Sunbeam manifest* for the
 > retired CLI path; it's kept only as a channel-pin reference. The live channel pins
 > now live in the two bundle files.
+
+## Charm source: charmhub or local
+
+Phases 03/03b deploy the same topology from one of two sources, selected by
+`CHARM_SOURCE`:
+
+- **`charmhub`** (default) — published charms on their `2026.1/edge` (etc.)
+  channels, OCI images omitted so Juju pulls each revision's image. This is the
+  diagnostic mode that surfaces per-image s390x gaps. Bundles:
+  `manifests/control-plane-k8s-s390x.yaml`, `manifests/machine-lpar-s390x.yaml`.
+- **`local`** — the Sunbeam charms we build for s390x, deployed from
+  `./charms/*_s390x.charm` with their workload OCI images pinned to s390x rocks.
+  This actually exercises our builds on the modified K8s substrate. Bundles:
+  `manifests/control-plane-k8s-s390x-local.yaml`,
+  `manifests/machine-lpar-s390x-local.yaml`. External dependencies we do **not**
+  build (`mysql-k8s`, `rabbitmq-k8s`, `self-signed-certificates`, `traefik-k8s`,
+  `mysql-router-k8s`, `microceph`) stay on charmhub in both modes.
+
+```bash
+# diagnostic, published charms (default)
+./run.sh 03 && ./run.sh 03b
+# our s390x builds
+CHARM_SOURCE=local ./run.sh 03 && CHARM_SOURCE=local ./run.sh 03b
+```
+
+For `local`: first stage the `.charm` files in `charms/` (see
+[charms/README.md](charms/README.md)) and replace the `REPLACE-ME/...:s390x`
+resource placeholders in `control-plane-k8s-s390x-local.yaml` with real s390x rock
+refs. Heads-up: the external charmhub charms above still need their own s390x
+images — check with `tools/check_oci_arch.sh` first, as a missing one there will
+stall the deploy regardless of our charms.
 
 ## Useful environment overrides
 
@@ -166,9 +226,14 @@ always get a post-mortem tarball.
 | `K8S_CHANNEL` | `latest/edge` | 01/02b |
 | `JUJU_CHANNEL` | `3/stable` | 01 |
 | `JUJU_CONTROLLER` / `K8S_MODEL` / `MACHINE_MODEL` / `MANUAL_CLOUD` | `sunbeam-controller` / `openstack` / `machines` / `lpar-manual` | 03/03b/04/05/06 |
+| `CHARM_SOURCE` | `charmhub` | 03/03b — `charmhub` deploys published charms, `local` deploys our s390x `.charm` builds (see "Charm source") |
+| `BUNDLE` | per-phase `*-s390x.yaml` | 03/03b — explicit bundle path; overrides `CHARM_SOURCE` |
 | `DEPLOY_TIMEOUT` | `3600` | 03/03b settle wait |
 | `EXT_NET_NAME` / `EXT_SUBNET_RANGE` / `EXT_SUBNET_GW` / `EXT_SUBNET_POOL` / `EXT_PHYSNET` | external-network / 172.16.2.0/24 / .1 / .50-.200 / physnet1 | 04 |
-| `IMAGE_URL` | noble s390x cloud image | 04 |
+| `EXTERNAL_BRIDGE_ADDRESS` | unset | 03b — optional routed-provider address applied to the hypervisor's `br-ex` (for example `172.16.2.1/24` on a single-NIC nested VM) |
+| `IMAGE_URL` | Noble cloud image for `TARGET_ARCH` | 04 |
+| `SMOKE_VALIDATE_SSH` / `SMOKE_SSH_USER` | `1` / `ubuntu` | 04b — floating-IP SSH acceptance check |
+| `TEST_SHARE_NOTES_FILE` | unset | 99 — optional Markdown file appended as “Notes and known issues” in the publishable report |
 
 ## Artifact bundle contents
 
@@ -182,7 +247,15 @@ Each `artifacts/<run-id>/` contains:
 - `manual-cloud.yaml`, `manual_host_ip`, `lb_cidr`, `get-admin-account.json`
 - `cloud-admin-openrc`, `ca_bundle.pem` (if 04 ran)
 - `tempest/` + `tempest_report/` (if 06 ran)
-- `sunbeam-s390x-<run-id>.tar.zst`
+- `smoke_server.yaml`, `smoke_volume.yaml` (if 04b ran)
+- `sunbeam-<arch>-<run-id>.tar.zst`
+- `test-share/` and `test-share-<arch>-<run-id>.tar.zst`, containing a flat,
+  human-reviewable report with `README.md`, `juju_status.txt`,
+  `catalog_list.txt`, `hypervisor_list.txt`, `image_list.txt`,
+  `network_list.txt`, `network_agent_list.txt`,
+  `network_extension_list.txt`, `ceph_tests.txt`, `instance_launch.txt`,
+  `instance_ssh.txt`, `tempest_smoke.txt`, and Sunbeam-specific bundle/K8s
+  evidence.
 
 ## Load-balancer (most likely stall point)
 
