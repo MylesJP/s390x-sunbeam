@@ -47,6 +47,7 @@ else
     BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_m_bundle}}"
 fi
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
+READINESS_TIMEOUT="${READINESS_TIMEOUT:-${DEPLOY_TIMEOUT}}"
 ARCH="$(target_arch)"
 
 if [[ ! -r "${BUNDLE}" ]]; then
@@ -117,12 +118,13 @@ if [[ -n "${PROXY_URL:-}" ]]; then
             "juju-no-proxy=${NO_PROXY_VAL}" "apt-no-proxy=${NO_PROXY_VAL}"
 fi
 
-# 3. Enrol this LPAR as machine 0 (manual provisioning over SSH). The first
-#    machine added to an empty model becomes "0", which the bundle targets.
+# 3. Enrol this LPAR (manual provisioning over SSH). Juju machine IDs are
+#    monotonic and are not reused after a failed attempt, so do not assume the
+#    enrolled machine will be machine 0.
 machine_count=$(juju machines -m "${CONTROLLER}:${MACHINE_MODEL}" --format=json 2>/dev/null \
     | jq '.machines | length' 2>/dev/null || echo 0)
 if [[ "${machine_count}" == "0" ]]; then
-    log_step "enrolling ${ssh_target} as machine 0 of ${MACHINE_MODEL}"
+    log_step "enrolling ${ssh_target} into ${MACHINE_MODEL}"
     if ! run_logged "juju add-machine ssh" -- \
             juju add-machine -m "${CONTROLLER}:${MACHINE_MODEL}" "ssh:${ssh_target}"; then
         log "FATAL: juju add-machine ssh:${ssh_target} failed. Check key-based SSH + passwordless sudo (phase 02)."
@@ -131,6 +133,20 @@ if [[ "${machine_count}" == "0" ]]; then
 else
     log "machine model already has ${machine_count} machine(s); skipping add-machine"
 fi
+
+machine_id="$(juju machines -m "${CONTROLLER}:${MACHINE_MODEL}" --format=json \
+    | jq -r --arg instance "manual:${host_ip}" '
+        .machines | to_entries
+        | map(select(.value["instance-id"] == $instance))
+        | sort_by(.key | tonumber)
+        | last.key // empty
+    ')"
+if [[ -z "${machine_id}" ]]; then
+    log "FATAL: could not find enrolled manual machine for ${host_ip}"
+    juju machines -m "${CONTROLLER}:${MACHINE_MODEL}" 2>&1 | tee -a "${PHASE_LOG}" || true
+    exit 1
+fi
+log "bundle machine 0 will map to enrolled Juju machine ${machine_id}"
 
 # 4. Deploy the machine bundle. Its saas: block consumes the control-plane offers
 #    (admin/${K8S_MODEL}.*) created in phase 03.
@@ -141,7 +157,7 @@ cd "${REPO_ROOT}"
 rc=0
 run_logged "juju deploy machine bundle" -- \
     juju deploy -m "${CONTROLLER}:${MACHINE_MODEL}" "${BUNDLE}" \
-        --map-machines=existing,0=0 || rc=$?
+        --map-machines="existing,0=${machine_id}" || rc=$?
 if (( rc != 0 )); then
     log "WARN: juju deploy (machine) returned ${rc}. Phase 05 will still capture state."
     echo "${rc}" > "${ARTIFACT_DIR}/.status/${PHASE}.failed"
@@ -173,6 +189,24 @@ run_logged "juju integrate cinder:storage-backend" -- \
 #    expected and captured by phase 05).
 log_step "waiting up to ${DEPLOY_TIMEOUT}s for ${MACHINE_MODEL} to settle"
 juju_wait_settle "${CONTROLLER}:${MACHINE_MODEL}" "${DEPLOY_TIMEOUT}" || true
+
+log_step "gating both models on active workloads (timeout ${READINESS_TIMEOUT}s each)"
+readiness_rc=0
+juju_wait_units_active "${CONTROLLER}:${MACHINE_MODEL}" "${READINESS_TIMEOUT}" || readiness_rc=1
+juju_wait_units_active "${CONTROLLER}:${K8S_MODEL}" "${READINESS_TIMEOUT}" || readiness_rc=1
+if (( readiness_rc != 0 )); then
+    if snap services openstack-hypervisor.libvirtd 2>/dev/null \
+            | awk 'NR > 1 && $3 != "active" { found=1 } END { exit !found }'; then
+        log "ERROR: openstack-hypervisor.libvirtd is not active"
+        if sudo journalctl -u snap.openstack-hypervisor.libvirtd.service -n 50 --no-pager 2>/dev/null \
+                | grep -q "/etc/mdevctl.d.*Permission denied"; then
+            log "ERROR: installed openstack-hypervisor snap cannot read /etc/mdevctl.d under strict confinement."
+            log "This is a snap packaging defect; use a fixed revision with a read-only system-files plug for /etc/mdevctl.d."
+        fi
+    fi
+    echo 1 > "${ARTIFACT_DIR}/.status/${PHASE}.failed"
+    exit 1
+fi
 
 phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"

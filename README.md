@@ -272,6 +272,7 @@ stall the deploy regardless of our charms.
 | `CHARM_SOURCE` | `charmhub` | 03/03b — `charmhub`, `hybrid`, or `local` (see "Charm source") |
 | `BUNDLE` | per-phase `*-s390x.yaml` | 03/03b — explicit bundle path; overrides `CHARM_SOURCE` |
 | `DEPLOY_TIMEOUT` | `3600` | 03/03b settle wait |
+| `READINESS_TIMEOUT` | value of `DEPLOY_TIMEOUT` | 03b — final per-model wait for every unit workload to become active |
 | `EXT_NET_NAME` / `EXT_SUBNET_RANGE` / `EXT_SUBNET_GW` / `EXT_SUBNET_POOL` / `EXT_PHYSNET` | external-network / 172.16.2.0/24 / .1 / .50-.200 / physnet1 | 04 |
 | `EXTERNAL_BRIDGE_ADDRESS` | unset | 03b — optional routed-provider address applied to the hypervisor's `br-ex` (for example `172.16.2.1/24` on a single-NIC nested VM) |
 | `IMAGE_URL` | Noble cloud image for `TARGET_ARCH` | 04 |
@@ -296,6 +297,26 @@ expected to block until the machine-plane storage offer exists. Nova may also
 briefly report a conductor crash loop because its Pebble liveness check runs
 while the service is deliberately disabled pending relations; evaluate final
 unit health after phase 03b wires both models together.
+
+Phase 03b discovers the actual Juju ID of the enrolled manual machine and maps
+bundle machine `0` to it. Juju does not reuse IDs after failed enrolment, so
+hard-coding `0=0` can otherwise create an impossible extra machine on the
+manual provider.
+
+Phase 03b has two distinct gates. It first waits for Juju agents to finish
+hooks, then requires every unit in both the `machines` and `openstack` models
+to report an active workload. An idle agent with a blocked, waiting, or error
+workload is therefore a failed phase rather than a false success.
+
+The first s390x `openstack-hypervisor` revision tested on Noble
+(`2026.1/edge`, snap revision 646 on June 25, 2026) had a strict-confinement
+gap: `libvirtd` could not monitor `/etc/mdevctl.d`, exited, and the configure
+hook subsequently failed because `virtqemud-sock` did not exist. The correct
+snap-side fix is a read-only `system-files` plug for `/etc/mdevctl.d` connected
+to the `libvirtd` app. Phase 03b detects this exact failure and stops with a
+packaging error; do not disable AppArmor to hide it. The tested source patch is
+kept at `patches/openstack-hypervisor-mdevctl-system-files.patch` until an
+equivalent fix is published.
 
 ## Artifact bundle contents
 

@@ -132,6 +132,36 @@ juju_wait_settle() {
     return 1
 }
 
+# juju_wait_units_active <controller:model> [timeout_seconds]
+# Wait until every unit reports workload=active. Unlike juju_wait_settle this is
+# a final deployment gate: idle agents with blocked/waiting/error workloads are
+# not a successful cloud.
+juju_wait_units_active() {
+    local target="$1" timeout="${2:-3600}"
+    local deadline unhealthy
+    deadline=$(( $(date +%s) + timeout ))
+    while (( $(date +%s) < deadline )); do
+        unhealthy=$(juju status -m "${target}" --format=json 2>/dev/null \
+            | jq -r '
+                [.applications | to_entries[] as $app
+                 | ($app.value.units // {}) | to_entries[]
+                 | select(.value["workload-status"].current != "active")
+                 | "\($app.key)/\(.key | split("/")[-1])=\(.value["workload-status"].current)"]
+                | join(",")
+            ' 2>/dev/null || echo "status-unavailable")
+        if [[ -z "${unhealthy}" ]]; then
+            log "model ${target} ready (all unit workloads active)"
+            return 0
+        fi
+        log "waiting for ${target} workloads: ${unhealthy}"
+        sleep 30
+    done
+
+    log "ERROR: ${target} did not become ready within ${timeout}s"
+    juju status -m "${target}" --color=false 2>&1 | tee -a "${PHASE_LOG:-/dev/null}" || true
+    return 1
+}
+
 # Append a row to arch_report.md, creating the file/header if absent.
 arch_report_append() {
     local kind="$1" name="$2" channel_or_tag="$3" available="$4" note="$5"
