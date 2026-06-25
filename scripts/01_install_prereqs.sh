@@ -51,7 +51,7 @@ run_logged "apt update" -- sudo apt-get update || \
 log_step "installing workflow prerequisites"
 prereq_packages=(
     ca-certificates curl git jq openssh-client openssh-server
-    python3 python3-venv python3-yaml skopeo tox zstd
+    python3 python3-openstackclient python3-venv python3-yaml skopeo tox zstd
 )
 if ! run_logged "apt install workflow prerequisites" -- \
         sudo apt-get install -y "${prereq_packages[@]}"; then

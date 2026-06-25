@@ -55,11 +55,13 @@ select_phases=()
 if [[ "${PHASE_ARG}" == "all" ]]; then
     select_phases=("${all_phases[@]}")
 else
-    # Prefer one exact phase name. Without this, `03` also selects `03b`,
-    # defeating the documented gated, step-by-step workflow.
+    # Prefer an exact script name or phase identifier (the filename portion
+    # before the first underscore). Thus `04` selects 04_configure only, while
+    # `04b` selects 04b_smoke_cloud.
     for p in "${all_phases[@]}"; do
         base=$(basename "$p")
-        if [[ "${base%.sh}" == "${PHASE_ARG}" ]]; then
+        phase_id="${base%%_*}"
+        if [[ "${base%.sh}" == "${PHASE_ARG}" || "${phase_id}" == "${PHASE_ARG}" ]]; then
             select_phases+=("$p")
         fi
     done

@@ -11,7 +11,7 @@ init_phase "${PHASE}"
 phase_skip_if_done "${PHASE}" && exit 0
 
 OPENRC="${ARTIFACT_DIR}/cloud-admin-openrc"
-OSC="${ARTIFACT_DIR}/.osc-venv/bin/openstack"
+OSC="$(command -v openstack 2>/dev/null || true)"
 if [[ ! -r "${OPENRC}" || ! -x "${OSC}" ]]; then
     log "FATAL: phase 04 must produce ${OPENRC} and the OpenStack client first"
     exit 1
@@ -33,6 +33,7 @@ cleanup="${SMOKE_CLEANUP:-1}"
 validate_ssh="${SMOKE_VALIDATE_SSH:-1}"
 ssh_user="${SMOKE_SSH_USER:-ubuntu}"
 launch_log="${ARTIFACT_DIR}/smoke_instance_launch.txt"
+fault_log="${ARTIFACT_DIR}/smoke_instance_fault.yaml"
 ssh_log="${ARTIFACT_DIR}/smoke_instance_ssh.txt"
 ssh_key="$(mktemp "${TMPDIR:-/tmp}/${prefix}-key.XXXXXX")"
 rm -f "${ssh_key}"
@@ -104,18 +105,33 @@ ssh-keygen -q -t ed25519 -N "" -f "${ssh_key}"
 "${OSC}" security group rule create --protocol tcp --dst-port 22 "${security_group}" >/dev/null 2>&1 || true
 
 log_step "booting smoke-test guest"
-{
-    echo "+ openstack server create --flavor m1.tiny --image ubuntu --network ${network} --key-name ${keypair} --security-group ${security_group} --wait ${server}"
-    if "${OSC}" server show "${server}" >/dev/null 2>&1; then
-        "${OSC}" server show "${server}"
-    else
+server_create_rc=0
+if "${OSC}" server show "${server}" >/dev/null 2>&1; then
+    "${OSC}" server show "${server}" > "${launch_log}" 2>&1
+else
+    {
+        echo "+ openstack server create --flavor m1.tiny --image ubuntu --network ${network} --key-name ${keypair} --security-group ${security_group} --wait ${server}"
         "${OSC}" server create --flavor m1.tiny --image ubuntu \
             --network "${network}" --key-name "${keypair}" \
             --security-group "${security_group}" --wait "${server}"
+    } > "${launch_log}" 2>&1 || server_create_rc=$?
+fi
+if (( server_create_rc != 0 )); then
+    "${OSC}" server show "${server}" -f yaml > "${fault_log}" 2>&1 || true
+    cat "${fault_log}" >> "${PHASE_LOG}" || true
+    if grep -qi "does not support ACPI" "${fault_log}" "${launch_log}"; then
+        log "FATAL: Nova/libvirt emitted ACPI for an s390x guest; see LP #2043987 and rebuild openstack-hypervisor with ppa:mylesjp/nova-acpi-patch"
+    else
+        log "FATAL: smoke-test guest create failed; see ${launch_log} and ${fault_log}"
     fi
-} > "${launch_log}" 2>&1
+    exit 1
+fi
 if ! wait_for_status server "${server}" ACTIVE 600; then
-    "${OSC}" server show "${server}" -f yaml 2>&1 | tee -a "${PHASE_LOG}" || true
+    "${OSC}" server show "${server}" -f yaml 2>&1 | tee "${fault_log}" | tee -a "${PHASE_LOG}" || true
+    if grep -qi "does not support ACPI" "${fault_log}" "${launch_log}"; then
+        log "FATAL: Nova/libvirt emitted ACPI for an s390x guest; see LP #2043987 and rebuild openstack-hypervisor with ppa:mylesjp/nova-acpi-patch"
+        exit 1
+    fi
     log "FATAL: smoke-test guest did not become ACTIVE"
     exit 1
 fi

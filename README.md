@@ -318,6 +318,36 @@ packaging error; do not disable AppArmor to hide it. The tested source patch is
 kept at `patches/openstack-hypervisor-mdevctl-system-files.patch` until an
 equivalent fix is published.
 
+The same initial s390x build also staged the non-DPDK `ovs-vswitchd` binary at
+`usr/lib/openvswitch-switch/ovs-vswitchd` without the package-maintainer-created
+`usr/sbin/ovs-vswitchd` link. This causes `ovsdb-server` startup to fail while
+setting the OVS version. The source patch also creates that fallback symlink
+when the DPDK binary is unavailable.
+
+The initial QEMU build list also omitted `s390x-softmmu`, leaving libvirt
+without a native s390x emulator and causing Nova compute to fail its QEMU
+minimum-version check. Apply
+`patches/openstack-hypervisor-qemu-s390x-target.patch` when building the local
+s390x snap.
+
+The first guest boot can also fail with
+`machine type 's390-ccw-virtio-*' does not support ACPI`. This is the Nova
+s390x ACPI bug tracked as LP #2043987. For local validation builds, apply
+`patches/openstack-hypervisor-nova-acpi-ppa.patch` so the hypervisor snap stages
+Nova from `ppa:mylesjp/nova-acpi-patch`; then confirm the snapcraft build log or
+`apt-cache policy python3-nova` inside the build environment selects that PPA.
+
+The first s390x `cinder-volume` snap retained an app-level
+`x86_64-linux-gnu/ceph` library path, so its bundled `rados` and `rbd` Python
+modules could not load `libceph-common.so.2`. Apply
+`patches/cinder-volume-ceph-library-triplet.patch` for an
+architecture-correct Ceph library path.
+
+Phase 04 uses Ubuntu's `python3-openstackclient` package. Installing the latest
+client from PyPI on s390x can fall back to compiling `cryptography` with Rust
+because upstream wheels are unavailable; this is slower, less reproducible,
+and may fail on restricted-egress hosts.
+
 ## Artifact bundle contents
 
 Each `artifacts/<run-id>/` contains:

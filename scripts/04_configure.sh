@@ -59,18 +59,14 @@ else
     log "WARN: no CA certs extracted; TLS verification may fail. Consider --insecure for the openstack client."
 fi
 
-# 3. openstack client in a venv.
-venv="${ARTIFACT_DIR}/.osc-venv"
-if [[ ! -x "${venv}/bin/openstack" ]]; then
-    log_step "creating openstack-client venv at ${venv}"
-    if ! dpkg -s python3-venv >/dev/null 2>&1; then
-        run_logged "apt install python3-venv" -- sudo apt-get install -y python3-venv
-    fi
-    python3 -m venv "${venv}"
-    "${venv}/bin/pip" install --upgrade pip >>"${PHASE_LOG}" 2>&1
-    "${venv}/bin/pip" install python-openstackclient >>"${PHASE_LOG}" 2>&1
+# 3. OpenStack client. Use Ubuntu's architecture-native package: PyPI does not
+# publish wheels for every python-openstackclient dependency on s390x (notably
+# cryptography), which otherwise makes pip attempt an unnecessary Rust build.
+if ! command -v openstack >/dev/null 2>&1; then
+    run_logged "apt install python3-openstackclient" -- \
+        sudo apt-get install -y python3-openstackclient
 fi
-OSC="${venv}/bin/openstack"
+OSC="$(command -v openstack)"
 
 # 4. Demo resources (minimal replica of cloud/etc/demo-setup/main.tf). Each step
 #    is best-effort: a partial cloud is still worth capturing + tempest-probing.
