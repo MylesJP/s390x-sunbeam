@@ -99,13 +99,17 @@ if (( NEEDS_S390X_CNI )); then
         | tee -a "${PHASE_LOG}" || log "WARN: calico-kube-controllers did not reach Ready"
 fi
 
-# (s390x only) Canonical K8s ships metrics-server in kube-system whose
-# ghcr.io/canonical image has no s390x build; rewrite to upstream. On amd64 the
-# bundled image is fine, so skip.
-if (( NEEDS_S390X_CNI )) && sudo k8s kubectl -n kube-system get deployment metrics-server >/dev/null 2>&1; then
-    log_step "rewriting bundled metrics-server image to upstream (s390x)"
-    "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" metrics-server || \
-        log "WARN: metrics-server rewrite reported issues (see arch_report.md)"
+# Metrics Server is not required by this deployment and its images are not
+# consistently reachable/published for s390x. Remove it rather than carrying
+# another architecture-specific dependency.
+if (( NEEDS_S390X_CNI )); then
+    log_step "removing optional metrics-server components (s390x)"
+    sudo k8s kubectl -n kube-system delete deployment metrics-server \
+        --ignore-not-found >/dev/null 2>&1 || true
+    sudo k8s kubectl -n kube-system delete service metrics-server \
+        --ignore-not-found >/dev/null 2>&1 || true
+    sudo k8s kubectl delete apiservice v1beta1.metrics.k8s.io \
+        --ignore-not-found >/dev/null 2>&1 || true
 fi
 
 # 4. Enable core addons. Rewrite their images to upstream only on s390x.
@@ -115,6 +119,19 @@ for addon in "${ADDONS[@]}"; do
     run_logged "k8s enable ${addon}" -- sudo k8s enable "${addon}" || \
         log "WARN: k8s enable ${addon} returned non-zero"
     if (( NEEDS_S390X_CNI )); then
+        if [[ "${addon}" == "local-storage" ]]; then
+            # Resizing and VolumeSnapshots are not needed for the smoke
+            # deployment. Keep only the driver, registrar and provisioner.
+            log_step "removing optional local-storage CSI sidecars (s390x)"
+            sudo k8s kubectl -n kube-system patch statefulset \
+                ck-storage-rawfile-csi-controller --type=json \
+                -p='[{"op":"remove","path":"/spec/template/spec/containers/1"}]' \
+                >/dev/null 2>&1 || true
+            sudo k8s kubectl -n kube-system patch daemonset \
+                ck-storage-rawfile-csi-node --type=json \
+                -p='[{"op":"remove","path":"/spec/template/spec/containers/3"}]' \
+                >/dev/null 2>&1 || true
+        fi
         "${SCRIPT_DIR}/../tools/rewrite_k8s_addon_images.sh" "${addon}" || \
             log "WARN: rewrite_k8s_addon_images for ${addon} reported unmapped images"
     fi

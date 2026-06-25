@@ -15,6 +15,15 @@ init_phase "${PHASE}"
 
 phase_skip_if_done "${PHASE}" && exit 0
 
+# Manual-machine provisioning downloads the Juju agent stream from the client
+# shell before the machine exists. Keep that request off a proxy which rejects
+# streams.canonical.com.
+if [[ -n "${PROXY_URL:-}" && -n "${NO_PROXY_DEFAULT:-}" ]]; then
+    export NO_PROXY="${NO_PROXY_DEFAULT}"
+    export no_proxy="${NO_PROXY_DEFAULT}"
+    log "using NO_PROXY=${NO_PROXY_DEFAULT} for Juju agent stream access"
+fi
+
 CONTROLLER="${JUJU_CONTROLLER:-sunbeam-controller}"
 K8S_MODEL="${K8S_MODEL:-openstack}"
 MACHINE_MODEL="${MACHINE_MODEL:-machines}"
@@ -25,10 +34,20 @@ CHARM_SOURCE="${CHARM_SOURCE:-charmhub}"
 case "${CHARM_SOURCE}" in
     charmhub) _m_bundle="machine-lpar-s390x.yaml" ;;
     local)    _m_bundle="machine-lpar-s390x-local.yaml" ;;
-    *) log "FATAL: CHARM_SOURCE must be 'charmhub' or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
+    hybrid)
+        python3 "${REPO_ROOT}/tools/render_hybrid_bundles.py" \
+            --repo "${REPO_ROOT}" --output-dir "${ARTIFACT_DIR}"
+        _m_bundle="${ARTIFACT_DIR}/machine-lpar-s390x-hybrid.yaml"
+        ;;
+    *) log "FATAL: CHARM_SOURCE must be 'charmhub', 'hybrid', or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
 esac
-BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_m_bundle}}"
+if [[ "${_m_bundle}" = /* ]]; then
+    BUNDLE="${BUNDLE:-${_m_bundle}}"
+else
+    BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_m_bundle}}"
+fi
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
+ARCH="$(target_arch)"
 
 if [[ ! -r "${BUNDLE}" ]]; then
     log "FATAL: machine bundle missing at ${BUNDLE}"
@@ -84,6 +103,9 @@ else
     run_logged "juju add-model ${MACHINE_MODEL}" -- \
         juju add-model "${MACHINE_MODEL}" "${MANUAL_CLOUD}"
 fi
+
+run_logged "set ${MACHINE_MODEL} architecture constraint" -- \
+    juju set-model-constraints -m "${CONTROLLER}:${MACHINE_MODEL}" "arch=${ARCH}"
 
 if [[ -n "${PROXY_URL:-}" ]]; then
     NO_PROXY_VAL="${NO_PROXY_DEFAULT:-localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.svc,.cluster.local}"

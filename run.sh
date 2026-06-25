@@ -55,12 +55,22 @@ select_phases=()
 if [[ "${PHASE_ARG}" == "all" ]]; then
     select_phases=("${all_phases[@]}")
 else
+    # Prefer one exact phase name. Without this, `03` also selects `03b`,
+    # defeating the documented gated, step-by-step workflow.
     for p in "${all_phases[@]}"; do
         base=$(basename "$p")
-        if [[ "${base}" == "${PHASE_ARG}"* ]] || [[ "${base%.sh}" == "${PHASE_ARG}" ]]; then
+        if [[ "${base%.sh}" == "${PHASE_ARG}" ]]; then
             select_phases+=("$p")
         fi
     done
+    if (( ${#select_phases[@]} == 0 )); then
+        for p in "${all_phases[@]}"; do
+            base=$(basename "$p")
+            if [[ "${base}" == "${PHASE_ARG}"* ]]; then
+                select_phases+=("$p")
+            fi
+        done
+    fi
 fi
 
 if (( ${#select_phases[@]} == 0 )); then

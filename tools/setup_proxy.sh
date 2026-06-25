@@ -11,6 +11,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
+export RUN_ID="${RUN_ID:-proxy-setup}"
+export ARTIFACT_DIR="${ARTIFACT_DIR:-${REPO_ROOT}/artifacts/${RUN_ID}}"
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
@@ -25,9 +28,13 @@ fi
 log_step "configuring proxy: ${PROXY_URL}"
 
 # 1. /etc/environment -- so every new login + systemd unit picks it up.
-if ! grep -qxF "https_proxy=${PROXY_URL}" /etc/environment 2>/dev/null; then
-    log_step "writing proxy env to /etc/environment"
-    sudo tee -a /etc/environment >/dev/null <<EOF
+# Replace existing values rather than only appending once: EnvironmentFile can
+# override a systemd drop-in and leave a restarted daemon with stale NO_PROXY.
+log_step "updating proxy env in /etc/environment"
+sudo sed -i -E \
+    '/^(http_proxy|https_proxy|HTTP_PROXY|HTTPS_PROXY|no_proxy|NO_PROXY)=/d' \
+    /etc/environment
+sudo tee -a /etc/environment >/dev/null <<EOF
 http_proxy=${PROXY_URL}
 https_proxy=${PROXY_URL}
 HTTP_PROXY=${PROXY_URL}
@@ -35,7 +42,6 @@ HTTPS_PROXY=${PROXY_URL}
 no_proxy=${NO_PROXY_VAL}
 NO_PROXY=${NO_PROXY_VAL}
 EOF
-fi
 
 # 2. apt -- needed for any apt-get install during phase 01.
 apt_conf=/etc/apt/apt.conf.d/95proxy
@@ -56,26 +62,51 @@ if [[ "${current_http}" != "${PROXY_URL}" ]]; then
     sudo systemctl restart snapd
 fi
 
-# 4. K8s snap's k8sd unit -- containerd inside k8sd needs the proxy for
-# image pulls. Only relevant once the k8s snap is installed; safe to skip
-# otherwise.
-if systemctl list-unit-files 'snap.k8s.k8sd.service' 2>/dev/null | grep -q snap.k8s.k8sd.service; then
-    drop_in_dir=/etc/systemd/system/snap.k8s.k8sd.service.d
-    drop_in="${drop_in_dir}/proxy.conf"
-    if [[ ! -f "${drop_in}" ]] || ! grep -qF "${PROXY_URL}" "${drop_in}"; then
-        log_step "writing k8sd proxy drop-in to ${drop_in}"
-        sudo mkdir -p "${drop_in_dir}"
-        sudo tee "${drop_in}" >/dev/null <<EOF
+# 4. K8s snap services. k8sd reconciles features, while containerd performs
+# image pulls; both need the proxy.
+k8s_services=(snap.k8s.k8sd.service snap.k8s.containerd.service)
+for service in "${k8s_services[@]}"; do
+    if systemctl list-unit-files "${service}" 2>/dev/null | grep -q "${service}"; then
+        drop_in_dir="/etc/systemd/system/${service}.d"
+        drop_in="${drop_in_dir}/proxy.conf"
+        if [[ ! -f "${drop_in}" ]] || ! grep -qF "${PROXY_URL}" "${drop_in}" \
+                || ! grep -qF "${NO_PROXY_VAL}" "${drop_in}"; then
+            log_step "writing ${service} proxy drop-in to ${drop_in}"
+            sudo mkdir -p "${drop_in_dir}"
+            sudo tee "${drop_in}" >/dev/null <<EOF
 [Service]
 Environment="HTTP_PROXY=${PROXY_URL}"
 Environment="HTTPS_PROXY=${PROXY_URL}"
 Environment="NO_PROXY=${NO_PROXY_VAL}"
 EOF
-        sudo systemctl daemon-reload
-        sudo systemctl restart snap.k8s.k8sd.service
+            sudo systemctl daemon-reload
+            sudo systemctl restart "${service}"
+        fi
+    else
+        log "${service} not installed yet; skipping systemd drop-in"
     fi
-else
-    log "k8s snap not installed yet; skipping k8sd systemd drop-in"
+done
+
+# snap.k8s.containerd uses EnvironmentFile=/etc/environment. On some systemd
+# versions a normal restart can leave the existing main process alive, so
+# verify its live environment and ask Restart=always to replace it if stale.
+containerd_service=snap.k8s.containerd.service
+if systemctl is-active --quiet "${containerd_service}"; then
+    main_pid="$(systemctl show "${containerd_service}" -p MainPID --value)"
+    live_no_proxy="$(
+        sudo sh -c "tr '\\0' '\\n' </proc/${main_pid}/environ" 2>/dev/null \
+            | sed -n 's/^NO_PROXY=//p'
+    )"
+    if [[ "${live_no_proxy}" != "${NO_PROXY_VAL}" ]]; then
+        log_step "restarting containerd main process to apply updated NO_PROXY"
+        old_pid="${main_pid}"
+        sudo systemctl kill --kill-who=main --signal=SIGTERM "${containerd_service}"
+        for _ in $(seq 1 30); do
+            main_pid="$(systemctl show "${containerd_service}" -p MainPID --value)"
+            [[ "${main_pid}" != "0" && "${main_pid}" != "${old_pid}" ]] && break
+            sleep 1
+        done
+    fi
 fi
 
 log_step "proxy setup complete"

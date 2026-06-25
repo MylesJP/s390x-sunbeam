@@ -21,10 +21,11 @@ addon="${1:?addon name required, e.g. coredns, metrics-server, local-storage}"
 # Update other addons as we learn each one's correct upstream image + tag.
 declare -A IMAGE_MAP=(
     ["ghcr.io/canonical/coredns"]="docker.io/coredns/coredns:1.12.1"
-    ["ghcr.io/canonical/metrics-server"]="registry.k8s.io/metrics-server/metrics-server:v0.7.2"
-    # Add as discovered:
-    #   ["ghcr.io/canonical/local-path-provisioner"]="docker.io/rancher/local-path-provisioner:v0.0.30"
-    #   ["ghcr.io/canonical/cert-manager-controller"]="quay.io/jetstack/cert-manager-controller:v1.16.1"
+    ["ghcr.io/canonical/csi-node-driver-registrar"]="registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0"
+    ["ghcr.io/canonical/csi-provisioner"]="registry.k8s.io/sig-storage/csi-provisioner:v5.3.0"
+    ["ghcr.io/canonical/rawfile-localpv"]="${RAWFILE_LOCALPV_IMAGE:-docker.io/library/rawfile-localpv:0.8.3-s390x}"
+    ["ghcr.io/canonical/metallb-controller"]="quay.io/metallb/controller:v0.15.3"
+    ["ghcr.io/canonical/metallb-speaker"]="quay.io/metallb/speaker:v0.15.3"
 )
 
 # Namespace each addon lives in (best-effort defaults; the script also tries -A).

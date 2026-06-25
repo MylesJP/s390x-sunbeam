@@ -88,12 +88,42 @@ Set `PROXY_URL` before running anything; the phase scripts configure shell env,
 [tools/setup_proxy.sh](tools/setup_proxy.sh):
 
 ```bash
-export PROXY_URL=http://squid.ps6.internal:3128
+export PROXY_URL=http://squid.internal:3128
+export NO_PROXY_DEFAULT='localhost,127.0.0.1,::1,<host-ip>,<host-subnet>,10.1.0.0/16,10.152.183.0/24,.svc,.cluster.local,.charmhub.io,charmhub.io,.jujucharms.com,registry.jujucharms.com,streams.canonical.com'
 ./run.sh all
 ```
 
+Define `NO_PROXY_DEFAULT` before deriving `NO_PROXY`. A combined assignment
+such as `export NO_PROXY_DEFAULT=... NO_PROXY="$NO_PROXY_DEFAULT"` expands the
+old value and can leave `NO_PROXY` empty. The symptom is `juju add-k8s`
+failing with `Get "https://<node>:6443/...": Forbidden` because the Kubernetes
+API request went through Squid. Phase 03 now applies `NO_PROXY_DEFAULT`
+defensively.
+
+The ps6 Squid currently rejects CONNECT requests to `api.charmhub.io`, while
+the LPAR can reach it directly. Keep `.charmhub.io,charmhub.io` in
+`NO_PROXY_DEFAULT`; phase 03 propagates that bypass into both Juju models.
+The same applies to `registry.jujucharms.com`, which containerd uses for charm
+OCI resources. Include `.jujucharms.com,registry.jujucharms.com`, then rerun
+`tools/setup_proxy.sh` so the updated bypass reaches the containerd service.
+Manual-machine enrolment also downloads the Juju agent index from
+`streams.canonical.com`, which must bypass this Squid deployment.
+
+Both `snap.k8s.k8sd.service` and `snap.k8s.containerd.service` need the proxy:
+`k8sd` reconciles addons, while containerd pulls OCI images. Verify with:
+
+```bash
+sudo systemctl show snap.k8s.k8sd.service -p Environment --no-pager
+sudo systemctl show snap.k8s.containerd.service -p Environment --no-pager
+curl -I --connect-timeout 15 https://ghcr.io/v2/
+```
+
+The helper can also be run directly after exporting `PROXY_URL` and
+`NO_PROXY_DEFAULT`; it derives its repository/run context automatically.
+
 On ps6 the Squid allowlist must cover the OCI registries (`ghcr.io`, `docker.io`,
-`registry.k8s.io`, `quay.io`). The `ps6_s390x_openstack` ACL in
+`registry.k8s.io`, `quay.io`) and registry redirects such as
+`*.docker.pkg.dev`. The `ps6_s390x_openstack` ACL in
 [canonical-is-internal-proxy-configs](https://launchpad.net/canonical-is-internal-proxy-configs)
 already covers special18-22 (10.103.192.218-.222); other LPARs need a follow-up MP.
 
@@ -185,15 +215,23 @@ directly to 05 + 99 so you always get a post-mortem tarball.
 > retired CLI path; it's kept only as a channel-pin reference. The live channel pins
 > now live in the two bundle files.
 
-## Charm source: charmhub or local
+## Charm source: Charmhub, hybrid, or local
 
-Phases 03/03b deploy the same topology from one of two sources, selected by
+Phases 03/03b deploy the same topology from one of three sources, selected by
 `CHARM_SOURCE`:
 
 - **`charmhub`** (default) — published charms on their `2026.1/edge` (etc.)
   channels, OCI images omitted so Juju pulls each revision's image. This is the
   diagnostic mode that surfaces per-image s390x gaps. Bundles:
   `manifests/control-plane-k8s-s390x.yaml`, `manifests/machine-lpar-s390x.yaml`.
+- **`hybrid`** — the Noble/s390x qualification path while publication catches
+  up. It generates bundles into the run artifact directory, using Charmhub for
+  published components and these local artifacts:
+  `rabbitmq-k8s_s390x.charm`, `microceph_s390x.charm`, and
+  `cinder-volume-ceph_s390x.charm`. It also selects the currently available
+  s390x TLS/Traefik channels and pins the RabbitMQ multi-architecture rock.
+  Generated bundles use absolute paths for local charms because Juju resolves
+  them relative to the bundle file under `artifacts/<run-id>/`.
 - **`local`** — the Sunbeam charms we build for s390x, deployed from
   `./charms/*_s390x.charm` with their workload OCI images pinned to s390x rocks.
   This actually exercises our builds on the modified K8s substrate. Bundles:
@@ -205,9 +243,14 @@ Phases 03/03b deploy the same topology from one of two sources, selected by
 ```bash
 # diagnostic, published charms (default)
 ./run.sh 03 && ./run.sh 03b
+# published stack plus the three unpublished Noble/s390x charms
+CHARM_SOURCE=hybrid ./run.sh 03 && CHARM_SOURCE=hybrid ./run.sh 03b
 # our s390x builds
 CHARM_SOURCE=local ./run.sh 03 && CHARM_SOURCE=local ./run.sh 03b
 ```
+
+Hybrid mode fails preflight unless all three local charm files exist and declare
+Ubuntu 24.04/s390x. Their expected location is `./charms/`.
 
 For `local`: first stage the `.charm` files in `charms/` (see
 [charms/README.md](charms/README.md)) and replace the `REPLACE-ME/...:s390x`
@@ -222,11 +265,11 @@ stall the deploy regardless of our charms.
 |----------|---------|---------|
 | `TARGET_ARCH` | `dpkg --print-architecture` (amd64/s390x) | all (CNI path, arch checks, guest image) |
 | `PROXY_URL` | unset | all (proxy setup) |
-| `LB_CIDR` | derived `<host /24>.240-.250` | 02b load-balancer pool |
+| `LB_CIDR` | derived `<host /24>.240-.250` | 02b load-balancer pool; set this explicitly to a reserved, unused L2 range |
 | `K8S_CHANNEL` | `latest/edge` | 01/02b |
 | `JUJU_CHANNEL` | `3/stable` | 01 |
 | `JUJU_CONTROLLER` / `K8S_MODEL` / `MACHINE_MODEL` / `MANUAL_CLOUD` | `sunbeam-controller` / `openstack` / `machines` / `lpar-manual` | 03/03b/04/05/06 |
-| `CHARM_SOURCE` | `charmhub` | 03/03b — `charmhub` deploys published charms, `local` deploys our s390x `.charm` builds (see "Charm source") |
+| `CHARM_SOURCE` | `charmhub` | 03/03b — `charmhub`, `hybrid`, or `local` (see "Charm source") |
 | `BUNDLE` | per-phase `*-s390x.yaml` | 03/03b — explicit bundle path; overrides `CHARM_SOURCE` |
 | `DEPLOY_TIMEOUT` | `3600` | 03/03b settle wait |
 | `EXT_NET_NAME` / `EXT_SUBNET_RANGE` / `EXT_SUBNET_GW` / `EXT_SUBNET_POOL` / `EXT_PHYSNET` | external-network / 172.16.2.0/24 / .1 / .50-.200 / physnet1 | 04 |
@@ -234,6 +277,25 @@ stall the deploy regardless of our charms.
 | `IMAGE_URL` | Noble cloud image for `TARGET_ARCH` | 04 |
 | `SMOKE_VALIDATE_SSH` / `SMOKE_SSH_USER` | `1` / `ubuntu` | 04b — floating-IP SSH acceptance check |
 | `TEST_SHARE_NOTES_FILE` | unset | 99 — optional Markdown file appended as “Notes and known issues” in the publishable report |
+
+Phase 03 sets the Juju model constraint `arch=$TARGET_ARCH` before deploying
+applications. Without it, an amd64 Juju client can create every CAAS pod with
+`nodeSelector: kubernetes.io/arch: amd64`, leaving all units Pending on the
+s390x LPAR.
+
+The current `traefik-k8s` s390x revision on `latest/edge` uses
+`ubuntu@26.04`/Python 3.14 and contains a `google._upb._message` extension that
+segfaults while importing OpenTelemetry protobuf modules. Phase 03 disables
+that optional accelerator inside Traefik's charm venv so protobuf falls back
+to its pure-Python implementation. Set `TRAEFIK_DISABLE_BROKEN_UPB=0` once a
+fixed revision is published.
+
+Phase 03 fails on unresolved `ErrImagePull`/`ImagePullBackOff` states, but it
+does not require every workload to be active before phase 03b. Cinder is
+expected to block until the machine-plane storage offer exists. Nova may also
+briefly report a conductor crash loop because its Pebble liveness check runs
+while the service is deliberately disabled pending relations; evaluate final
+unit health after phase 03b wires both models together.
 
 ## Artifact bundle contents
 
@@ -292,10 +354,71 @@ IBM Z alliances team has a working recipe in
 
 1. `sudo k8s bootstrap --file <cfg>` with `network.enabled: false` (no cilium).
 2. `sudo k8s kubectl apply -f vendor/pe-ibm/calico.yaml` — the *patched* Calico manifest.
-3. `sudo k8s enable <addon>` for dns, local-storage, load-balancer, then
-   `tools/rewrite_k8s_addon_images.sh` swaps each `ghcr.io/canonical/<x>` image to its
-   upstream s390x-capable equivalent.
-4. A smoke pod confirms scheduling, image pull, and pod networking on the LPAR.
+3. Remove Metrics Server on s390x; it is not required by OpenStack.
+4. Enable dns, local-storage, and load-balancer. The s390x path removes the
+   unused CSI resizer/snapshotter sidecars and rewrites required CSI/MetalLB
+   sidecars to upstream multi-architecture images.
+5. Use a locally built `rawfile-localpv:0.8.3` s390x image. Canonical's
+   `ghcr.io/canonical/rawfile-localpv:0.8.3-ck2` currently publishes amd64 and
+   arm64 only. The source recipe is
+   [canonical/rawfile-localpv-rocks](https://github.com/canonical/rawfile-localpv-rocks).
+6. A smoke pod confirms scheduling, image pull, and pod networking on the LPAR.
+7. A PVC/consumer pod must bind and reach Ready, and MetalLB must have both its
+   controller and speaker running, before phase 03.
+
+Useful live diagnostics:
+
+```bash
+sudo k8s kubectl get nodes
+sudo k8s kubectl get pods -A
+sudo k8s kubectl get events -A --sort-by=.lastTimestamp | tail -40
+sudo k8s status
+```
+
+Do not continue to Juju merely because the node is `Ready`: the PVC and
+LoadBalancer gates must also pass.
+
+### Build rawfile-localpv locally on the LPAR
+
+Launchpad remote-build is not required. On the Noble s390x LPAR, install
+Rockcraft and LXD, then run the repository helper:
+
+```bash
+sudo snap install rockcraft --classic
+sudo snap install lxd
+sudo lxd init --auto
+./tools/build_rawfile_localpv_rock.sh
+```
+
+The patch carried in `patches/rawfile-localpv-s390x.patch` adds the s390x
+platform, removes the Ubuntu Pro-only FIPS staging part, and makes `grpcio`
+use Ubuntu's OpenSSL. Its bundled BoringSSL otherwise fails with `Unknown
+target CPU` on s390x. The generated protobuf modules are committed upstream,
+so the runtime image does not need `grpcio-tools`.
+
+When Canonical K8s is already running, the helper also imports the resulting
+`.rock` through `/run/containerd/containerd.sock` and tags it as
+`docker.io/library/rawfile-localpv:0.8.3-s390x`. Phase 02b rewrites the
+addon's rawfile driver to that local tag. Override it, if needed, with
+`RAWFILE_LOCALPV_IMAGE`.
+
+If the LPAR's proxy blocks the redirect from `registry.k8s.io` to
+`*.pkg.dev`, sideload the registrar and provisioner from a workstation with
+Docker and direct registry access:
+
+```bash
+./tools/sideload_s390x_k8s_images.sh ubuntu@10.103.192.218
+```
+
+The helper uses containerized Skopeo to select the s390x manifests, transfers
+OCI archives over SSH, imports them through Canonical K8s's containerd socket,
+and restarts the rawfile CSI pods. A successful result is controller `1/1`
+and node `3/3`:
+
+```bash
+sudo k8s kubectl -n kube-system get pods \
+  -l app.kubernetes.io/name=rawfile-csi
+```
 
 ### Vendoring workflow
 
@@ -344,7 +467,7 @@ Set in the two bundle files (and the `*_CHANNEL` defaults in
 | `mysql-k8s`           | `8.0/stable`           |
 | `mysql-router-k8s`    | `8.0/edge`             |
 | `rabbitmq-k8s`        | `3.12/edge`            |
-| `traefik-k8s`         | `latest/candidate`     |
-| `self-signed-certificates` | `1/beta`          |
+| `traefik-k8s`         | `latest/candidate` (`latest/edge` in hybrid s390x mode) |
+| `self-signed-certificates` | `1/beta` (`1/edge` in hybrid s390x mode) |
 | `openstack-hypervisor`/`cinder-volume`/`cinder-volume-ceph`/`sunbeam-machine` | `2026.1/edge` |
 | `microceph` snap      | `squid/stable`         |

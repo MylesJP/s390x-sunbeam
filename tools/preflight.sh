@@ -17,8 +17,42 @@ if [[ "${ARCH}" != "${HOST_ARCH}" ]]; then
 fi
 
 if [[ "${CHARM_SOURCE:-charmhub}" != "charmhub" && "${ARCH}" == "amd64" ]]; then
-    log "FATAL: CHARM_SOURCE=local is s390x-specific; use CHARM_SOURCE=charmhub on amd64"
+    log "FATAL: CHARM_SOURCE=${CHARM_SOURCE} is s390x-specific; use CHARM_SOURCE=charmhub on amd64"
     exit 1
+fi
+
+if [[ "${CHARM_SOURCE:-charmhub}" == "hybrid" ]]; then
+    hybrid_charms=(
+        rabbitmq-k8s_s390x.charm
+        microceph_s390x.charm
+        cinder-volume-ceph_s390x.charm
+    )
+    for filename in "${hybrid_charms[@]}"; do
+        charm="${REPO_ROOT}/charms/${filename}"
+        if [[ ! -s "${charm}" ]]; then
+            log "FATAL: hybrid mode requires ${charm}"
+            exit 1
+        fi
+        python3 - "${charm}" <<'PY'
+import sys
+import zipfile
+import yaml
+
+path = sys.argv[1]
+with zipfile.ZipFile(path) as charm:
+    manifest = yaml.safe_load(charm.read("manifest.yaml"))
+bases = manifest.get("bases", [])
+valid = any(
+    base.get("name") == "ubuntu"
+    and base.get("channel") == "24.04"
+    and "s390x" in base.get("architectures", [])
+    for base in bases
+)
+if not valid:
+    raise SystemExit(f"{path}: expected an Ubuntu 24.04/s390x charm")
+print(f"{path}: Ubuntu 24.04/s390x OK")
+PY
+    done
 fi
 
 if [[ -r /etc/os-release ]]; then

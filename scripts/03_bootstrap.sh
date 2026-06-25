@@ -25,10 +25,20 @@ CHARM_SOURCE="${CHARM_SOURCE:-charmhub}"
 case "${CHARM_SOURCE}" in
     charmhub) _cp_bundle="control-plane-k8s-s390x.yaml" ;;
     local)    _cp_bundle="control-plane-k8s-s390x-local.yaml" ;;
-    *) log "FATAL: CHARM_SOURCE must be 'charmhub' or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
+    hybrid)
+        python3 "${REPO_ROOT}/tools/render_hybrid_bundles.py" \
+            --repo "${REPO_ROOT}" --output-dir "${ARTIFACT_DIR}"
+        _cp_bundle="${ARTIFACT_DIR}/control-plane-k8s-s390x-hybrid.yaml"
+        ;;
+    *) log "FATAL: CHARM_SOURCE must be 'charmhub', 'hybrid', or 'local' (got '${CHARM_SOURCE}')"; exit 2 ;;
 esac
-BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_cp_bundle}}"
+if [[ "${_cp_bundle}" = /* ]]; then
+    BUNDLE="${BUNDLE:-${_cp_bundle}}"
+else
+    BUNDLE="${BUNDLE:-${REPO_ROOT}/manifests/${_cp_bundle}}"
+fi
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
+ARCH="$(target_arch)"
 
 if [[ ! -r "${BUNDLE}" ]]; then
     log "FATAL: control-plane bundle missing at ${BUNDLE}"
@@ -36,6 +46,15 @@ if [[ ! -r "${BUNDLE}" ]]; then
 fi
 command -v juju >/dev/null 2>&1 || { log "FATAL: juju CLI missing (phase 01)"; exit 1; }
 command -v k8s  >/dev/null 2>&1 || { log "FATAL: k8s CLI missing (phase 02b)"; exit 1; }
+
+# `juju add-k8s` talks directly to the API endpoint from `k8s config`.
+# setup_proxy.sh runs as a subprocess and cannot export into this shell, so
+# enforce the caller-provided bypass list here as well.
+if [[ -n "${PROXY_URL:-}" && -n "${NO_PROXY_DEFAULT:-}" ]]; then
+    export NO_PROXY="${NO_PROXY_DEFAULT}"
+    export no_proxy="${NO_PROXY_DEFAULT}"
+    log "using NO_PROXY=${NO_PROXY_DEFAULT} for Juju/Kubernetes API access"
+fi
 
 # Background juju status watcher so a wedge during deploy is visible in artifacts
 # even if this phase times out.
@@ -83,6 +102,12 @@ else
     run_logged "juju add-model ${K8S_MODEL}" -- juju add-model "${K8S_MODEL}" "${K8S_CLOUD}"
 fi
 
+# The Juju client otherwise defaults CAAS application constraints to the
+# client's architecture (commonly amd64), producing pods with an impossible
+# kubernetes.io/arch selector on an s390x cluster.
+run_logged "set ${K8S_MODEL} architecture constraint" -- \
+    juju set-model-constraints -m "${CONTROLLER}:${K8S_MODEL}" "arch=${ARCH}"
+
 # Juju resolves charms/resources from inside controller/model workers, so shell,
 # apt, snapd and containerd proxy setup alone is not sufficient. Configure both
 # the controller model and workload model when PROXY_URL is in use.
@@ -102,8 +127,8 @@ fi
 
 # 4. Deploy the control-plane bundle (exports the cross-model offers).
 log_step "deploying control-plane bundle (source=${CHARM_SOURCE}) into ${K8S_MODEL}: ${BUNDLE}"
-# Deploy from the repo root so a 'local' bundle's `charm: ./charms/...` paths
-# resolve (harmless for the charmhub bundle, which uses an absolute path).
+# Hybrid bundles contain absolute local charm paths. Deploying from the repo
+# root remains necessary for the static local bundle's ./charms references.
 cd "${REPO_ROOT}"
 rc=0
 run_logged "juju deploy control-plane bundle" -- \
@@ -114,6 +139,27 @@ if (( rc != 0 )); then
     exit "${rc}"
 fi
 
+# Traefik revision 341 (ubuntu@26.04/s390x) currently packages a protobuf UPB
+# extension that segfaults under Python 3.14 while importing OpenTelemetry.
+# Disabling the optional accelerator makes protobuf use its pure-Python
+# implementation; Juju then retries the install hook automatically.
+if [[ "${ARCH}" == "s390x" && "${TRAEFIK_DISABLE_BROKEN_UPB:-1}" == "1" ]]; then
+    log_step "applying Traefik Python 3.14/s390x protobuf workaround"
+    if sudo k8s kubectl -n "${K8S_MODEL}" wait --for=condition=PodScheduled \
+            pod/traefik-0 --timeout=180s 2>&1 | tee -a "${PHASE_LOG}"; then
+        sudo k8s kubectl -n "${K8S_MODEL}" exec traefik-0 -c charm -- sh -c '
+            for so in /var/lib/juju/agents/unit-traefik-0/charm/venv/lib/python*/site-packages/google/_upb/_message.abi3.so; do
+                [ -f "$so" ] || continue
+                mv "$so" "$so.disabled"
+                echo "disabled crashing UPB extension: $so"
+            done
+        ' 2>&1 | tee -a "${PHASE_LOG}" || \
+            log "WARN: could not apply Traefik UPB workaround"
+    else
+        log "WARN: traefik-0 was not scheduled in time for the UPB workaround"
+    fi
+fi
+
 # 5. Bounded wait: poll until every unit's agent is settled (idle/error) or
 #    timeout. We do NOT require workload=active -- on s390x some apps are
 #    expected to block on missing OCI images; that is the signal, captured by
@@ -121,6 +167,16 @@ fi
 log_step "waiting up to ${DEPLOY_TIMEOUT}s for ${K8S_MODEL} to settle"
 juju_wait_settle "${CONTROLLER}:${K8S_MODEL}" "${DEPLOY_TIMEOUT}" || true
 juju offers -m "${CONTROLLER}:${K8S_MODEL}" 2>&1 | tee -a "${PHASE_LOG}" || true
+
+image_pull_errors="$(sudo k8s kubectl -n "${K8S_MODEL}" get pods -o json 2>/dev/null \
+    | jq '[.items[].status.containerStatuses[]? |
+        .state.waiting.reason? |
+        select(. == "ErrImagePull" or . == "ImagePullBackOff")] | length')"
+if (( image_pull_errors > 0 )); then
+    log "FATAL: ${image_pull_errors} control-plane container(s) still have image-pull errors"
+    sudo k8s kubectl -n "${K8S_MODEL}" get pods -o wide 2>&1 | tee -a "${PHASE_LOG}" || true
+    exit 1
+fi
 
 phase_done "${PHASE}"
 log_step "phase ${PHASE} complete"

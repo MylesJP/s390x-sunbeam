@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Download required s390x K8s images on a machine with registry access and
+# import them into Canonical K8s containerd on a proxy-restricted LPAR.
+set -euo pipefail
+
+TARGET="${1:?usage: $0 ubuntu@LPAR_ADDRESS}"
+OUT_DIR="${SIDELOAD_DIR:-/tmp/s390x-k8s-images}"
+SKOPEO_IMAGE="${SKOPEO_IMAGE:-quay.io/skopeo/stable:latest}"
+
+images=(
+    "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0"
+    "registry.k8s.io/sig-storage/csi-provisioner:v5.3.0"
+)
+
+command -v docker >/dev/null || {
+    echo "FATAL: docker is required on the download machine" >&2
+    exit 1
+}
+command -v ssh >/dev/null || {
+    echo "FATAL: ssh is required" >&2
+    exit 1
+}
+
+mkdir -p "${OUT_DIR}"
+
+archives=()
+for image in "${images[@]}"; do
+    leaf="${image##*/}"
+    archive="${OUT_DIR}/${leaf/:/-}-s390x.tar"
+    echo "Exporting linux/s390x ${image}"
+    docker run --rm -v "${OUT_DIR}:/out" "${SKOPEO_IMAGE}" copy \
+        --override-arch s390x \
+        "docker://${image}" \
+        "oci-archive:/out/${archive##*/}:${image}"
+    archives+=("${archive}")
+done
+
+remote_dir="/home/ubuntu/builds/s390x-k8s-images"
+ssh "${TARGET}" "mkdir -p '${remote_dir}'"
+scp "${archives[@]}" "${TARGET}:${remote_dir}/"
+
+for archive in "${archives[@]}"; do
+    remote_archive="${remote_dir}/${archive##*/}"
+    ssh "${TARGET}" \
+        "sudo /snap/k8s/current/bin/ctr \
+          --address /run/containerd/containerd.sock \
+          --namespace k8s.io images import '${remote_archive}'"
+done
+
+ssh "${TARGET}" \
+    "sudo k8s kubectl -n kube-system delete pod \
+      -l app.kubernetes.io/name=rawfile-csi --wait=false || true"
+
+echo "Images imported. Verify with:"
+echo "  ssh ${TARGET} sudo k8s kubectl -n kube-system get pods -l app.kubernetes.io/name=rawfile-csi"
