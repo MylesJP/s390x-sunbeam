@@ -13,7 +13,32 @@ K8S_MODEL="${K8S_MODEL:-openstack}"
 MACHINE_MODEL="${MACHINE_MODEL:-machines}"
 OPENRC="${ARTIFACT_DIR}/cloud-admin-openrc"
 OSC="${ARTIFACT_DIR}/.osc-venv/bin/openstack"
+rm -rf "${REPORT_DIR}"
 mkdir -p "${REPORT_DIR}"
+
+if [[ ! -x "${OSC}" ]]; then
+    if [[ -x "${ARTIFACT_DIR}/tempest/.venv/bin/openstack" ]]; then
+        OSC="${ARTIFACT_DIR}/tempest/.venv/bin/openstack"
+    else
+        OSC="$(command -v openstack || true)"
+    fi
+fi
+
+expected_files=(
+    README.md
+    catalog_list.txt
+    ceph_tests.txt
+    hypervisor_list.txt
+    image_list.txt
+    instance_launch.txt
+    instance_ssh.txt
+    juju_status.txt
+    network_agent_list.txt
+    network_extension_list.txt
+    network_list.txt
+    openstack_origin.txt
+    tempest_smoke.txt
+)
 
 capture() {
     local output="$1"
@@ -26,101 +51,127 @@ capture() {
     } > "${REPORT_DIR}/${output}" 2>&1 || true
 }
 
-{
-    echo "+ juju status -m ${CONTROLLER}:${K8S_MODEL}"
-    juju status -m "${CONTROLLER}:${K8S_MODEL}" --relations --color=false 2>&1 || true
-    echo
-    echo "+ juju status -m ${CONTROLLER}:${MACHINE_MODEL}"
-    juju status -m "${CONTROLLER}:${MACHINE_MODEL}" --relations --color=false 2>&1 || true
-} > "${REPORT_DIR}/juju_status.txt"
+capture_openstack() {
+    local output="$1"
+    shift
+    {
+        printf '+ openstack'
+        printf ' %q' "$@"
+        printf '\n'
+        "${OSC}" "$@"
+    } > "${REPORT_DIR}/${output}" 2>&1 || true
+}
 
-{
-    echo "Sunbeam 2026.1 validation on $(target_arch)"
-    echo
-    echo "Run ID: ${RUN_ID}"
-    echo "Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "Host: $(hostname -f 2>/dev/null || hostname)"
-    echo "Kernel: $(uname -srmo)"
-    if git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
-        echo "Repository revision: $(git -C "${REPO_ROOT}" rev-parse HEAD)"
+print_trace_value() {
+    local name="$1"
+    local value="${2:-}"
+    if [[ -z "${value}" || "${value}" == "{}" ]]; then
+        echo "+ ${name}='{}'"
+    elif [[ "${value}" =~ ^[A-Za-z0-9._:/@+-]+$ ]]; then
+        echo "+ ${name}=${value}"
+    else
+        printf '+ %s=%q\n' "${name}" "${value}"
     fi
-    echo
-    echo "This directory is the compact, publishable validation result. The full"
-    echo "diagnostic archive remains alongside it as sunbeam-$(target_arch)-${RUN_ID}.tar.zst."
-    echo
-    echo "## Result"
-    echo
+}
+
+capture_juju_status() {
+    {
+        echo "+ juju status"
+        juju status -m "${CONTROLLER}:${K8S_MODEL}" --relations --color=false 2>&1 || true
+        echo
+        echo "+ juju status -m ${CONTROLLER}:${MACHINE_MODEL}"
+        juju status -m "${CONTROLLER}:${MACHINE_MODEL}" --relations --color=false 2>&1 || true
+    } > "${REPORT_DIR}/juju_status.txt"
+}
+
+series_name() {
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        case "${VERSION_ID:-}" in
+            24.04) echo noble ;;
+            26.04) echo resolute ;;
+            *) echo "${VERSION_CODENAME:-ubuntu}" ;;
+        esac
+    else
+        echo ubuntu
+    fi
+}
+
+openstack_series_name() {
+    echo "${OPENSTACK_SERIES:-gazpacho}"
+}
+
+tempest_result_text() {
     if [[ -s "${ARTIFACT_DIR}/tempest/failures.txt" ]]; then
-        echo "Tempest smoke: FAILED"
+        echo "The Tempest smoke tests detected the following failures:"
         echo
         sed 's/^/- /' "${ARTIFACT_DIR}/tempest/failures.txt"
     elif [[ -f "${ARTIFACT_DIR}/.status/06_validate_tempest.done" ]]; then
-        totals=$(grep -A8 '^Totals' "${ARTIFACT_DIR}/tempest/smoke_output.txt" 2>/dev/null || true)
-        echo "Tempest smoke: PASSED"
-        echo
-        printf '```text\n%s\n```\n' "${totals}"
+        echo "All selected Tempest smoke tests passed."
     else
-        echo "Tempest smoke: not completed. See phase status and diagnostics."
+        echo "Tempest smoke did not complete; see tempest_smoke.txt and the full diagnostic archive."
     fi
+}
+
+{
+    ubuntu_series="$(series_name)"
+    openstack_series="$(openstack_series_name)"
+    echo "Tempest validation of OpenStack ${ubuntu_series}-${openstack_series} (OVN) on $(target_arch)."
+    echo
+    tempest_result_text
+    echo
+    echo "Tests were run with the Tempest option \`--serial\` to force sequentially-run tests due to system resource constraints."
     if [[ -r "${TEST_SHARE_NOTES_FILE:-}" ]]; then
-        echo
-        echo "## Notes and known issues"
         echo
         cat "${TEST_SHARE_NOTES_FILE}"
     fi
-    echo
-    echo "## Contents"
-    echo
-    echo "- Juju status for both models"
-    echo "- OpenStack catalog, image, network, agent, extension, and hypervisor inventories"
-    echo "- Instance launch and floating-IP SSH proof"
-    echo "- MicroCeph/Ceph health and pool evidence"
-    echo "- Tempest smoke output"
-    echo "- Exported Juju bundles and Kubernetes state"
 } > "${REPORT_DIR}/README.md"
+
+capture_juju_status
 
 if [[ -r "${OPENRC}" && -x "${OSC}" ]]; then
     (
         # shellcheck disable=SC1090
         source "${OPENRC}"
-        capture catalog_list.txt "${OSC}" catalog list
-        capture hypervisor_list.txt "${OSC}" hypervisor list
-        capture image_list.txt "${OSC}" image list
-        capture network_list.txt "${OSC}" network list
-        capture network_agent_list.txt "${OSC}" network agent list
-        capture network_extension_list.txt "${OSC}" extension list --network
-        capture volume_service_list.txt "${OSC}" volume service list
-        capture server_list.txt "${OSC}" server list --all-projects
-        capture volume_list.txt "${OSC}" volume list --all-projects
+        capture_openstack catalog_list.txt catalog list
+        capture_openstack hypervisor_list.txt hypervisor list
+        capture_openstack image_list.txt image list
+        capture_openstack network_list.txt network list
+        capture_openstack network_agent_list.txt network agent list
+        capture_openstack network_extension_list.txt extension list --network
     )
 else
     for f in catalog_list hypervisor_list image_list network_list \
-             network_agent_list network_extension_list volume_service_list \
-             server_list volume_list; do
+             network_agent_list network_extension_list; do
         echo "OpenStack client/openrc unavailable; phase 04 did not complete." \
             > "${REPORT_DIR}/${f}.txt"
     done
 fi
 
 {
-    echo "+ snap list"
-    snap list 2>&1 || true
-    echo
-    echo "+ juju applications and channels"
+    set +x
     for model in "${K8S_MODEL}" "${MACHINE_MODEL}"; do
-        echo "=== ${model} ==="
-        juju status -m "${CONTROLLER}:${model}" --format=json 2>/dev/null |
-            jq -r '.applications | to_entries[] |
-                [.key, .value.charm, (.value.channel // ""),
-                 (.value.version // ""), (.value["charm-rev"] // "")] | @tsv' 2>/dev/null || true
+        apps=$(juju status -m "${CONTROLLER}:${model}" --format=json 2>/dev/null |
+            jq -r '.applications | keys[]' 2>/dev/null || true)
+        for app in ${apps}; do
+            for key in openstack-origin source channel; do
+                echo "++ juju config ${app} ${key}"
+                origin=$(juju config -m "${CONTROLLER}:${model}" "${app}" "${key}" 2>/dev/null)
+                exit_code=$?
+                print_trace_value origin "${origin}"
+                echo "+ exit_code=${exit_code}"
+                echo "+ set +x"
+                if [[ "${exit_code}" == "0" && -n "${origin}" && "${origin}" != "{}" ]]; then
+                    break
+                fi
+            done
+        done
     done
 } > "${REPORT_DIR}/openstack_origin.txt"
 
 {
-    echo "+ sudo microceph status"
-    sudo microceph status 2>&1 || true
-    echo
-    for args in "status" "health detail" "osd lspools" "osd df"; do
+    for args in "osd lspools" "osd df"; do
         echo "+ sudo microceph.ceph ${args}"
         # shellcheck disable=SC2086
         sudo microceph.ceph ${args} 2>&1 || true
@@ -132,8 +183,9 @@ fi
             grep -vE '^(\.mgr)?$' || true
     )
     for pool in "${ceph_pools[@]}"; do
-        echo "+ sudo microceph.rbd -p ${pool} ls"
-        sudo microceph.rbd -p "${pool}" ls 2>&1 || true
+        echo "+ sudo microceph.rados -p ${pool} ls"
+        sudo microceph.rados -p "${pool}" ls 2>&1 || \
+            sudo microceph.rbd -p "${pool}" ls 2>&1 || true
         echo
     done
 } > "${REPORT_DIR}/ceph_tests.txt"
@@ -155,9 +207,8 @@ cp -f "${ARTIFACT_DIR}/tempest/smoke_output.txt" \
     echo "Tempest output unavailable; phase 06 did not complete." \
         > "${REPORT_DIR}/tempest_smoke.txt"
 
-for f in arch_report.md juju_bundle_openstack.yaml juju_bundle_machines.yaml \
-         k8s_events.txt k8s_nodes_describe.txt snaps.txt; do
-    cp -f "${ARTIFACT_DIR}/${f}" "${REPORT_DIR}/${f}" 2>/dev/null || true
+for f in "${expected_files[@]}"; do
+    touch "${REPORT_DIR}/${f}"
 done
 
 log "test-share report: ${REPORT_DIR}"

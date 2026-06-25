@@ -363,12 +363,13 @@ Each `artifacts/<run-id>/` contains:
 - `smoke_server.yaml`, `smoke_volume.yaml` (if 04b ran)
 - `sunbeam-<arch>-<run-id>.tar.zst`
 - `test-share/` and `test-share-<arch>-<run-id>.tar.zst`, containing a flat,
-  human-reviewable report with `README.md`, `juju_status.txt`,
+  human-reviewable report matching the legacy `openstack-charmers/test-share`
+  s390x file names: `README.md`, `juju_status.txt`,
   `catalog_list.txt`, `hypervisor_list.txt`, `image_list.txt`,
   `network_list.txt`, `network_agent_list.txt`,
   `network_extension_list.txt`, `ceph_tests.txt`, `instance_launch.txt`,
-  `instance_ssh.txt`, `tempest_smoke.txt`, and Sunbeam-specific bundle/K8s
-  evidence.
+  `instance_ssh.txt`, `openstack_origin.txt`, and `tempest_smoke.txt`.
+  Sunbeam-specific bundle/K8s evidence remains in the full diagnostic archive.
 
 ## Load-balancer (most likely stall point)
 
