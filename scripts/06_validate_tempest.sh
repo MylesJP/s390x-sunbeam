@@ -46,9 +46,11 @@ if [[ ! -s "${EXCLUDE_LIST}" ]]; then
     log "WARN: ${EXCLUDE_LIST} missing or empty; tempest will run with no exclusions"
 fi
 
-# 1. Required CLI tooling. python3-venv is on Ubuntu by default; pip we'll
-# use from inside the venv so no apt install is needed beyond it.
-log_step "ensuring python3-venv and openstack client are available"
+# 1. Required CLI tooling. Use distro cryptography inside the tempestconf venv
+# on s390x: PyPI may not have a usable wheel for the newest cryptography, which
+# makes pip try to bootstrap Rust from static.rust-lang.org. That is slow and is
+# commonly blocked by internal proxies.
+log_step "ensuring python3-venv, openstack client, and Python crypto deps are available"
 run_logged "apt update" -- sudo apt-get update || \
     log "WARN: apt-get update failed; package installs may fail"
 if ! command -v python3 >/dev/null 2>&1; then
@@ -57,6 +59,16 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 if ! dpkg -s python3-venv >/dev/null 2>&1; then
     run_logged "apt install python3-venv" -- sudo apt-get install -y python3-venv
+fi
+missing_tempestconf_debs=()
+for pkg in python3-cryptography python3-cffi python3-openstackclient; do
+    if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+        missing_tempestconf_debs+=("${pkg}")
+    fi
+done
+if ((${#missing_tempestconf_debs[@]})); then
+    run_logged "apt install tempestconf python deps" -- \
+        sudo apt-get install -y "${missing_tempestconf_debs[@]}"
 fi
 
 # 2. Clone upstream tempest (if not already cloned).
@@ -72,11 +84,20 @@ fi
 venv="${TEMPEST_DIR}/.venv"
 if [[ ! -x "${venv}/bin/discover-tempest-config" ]]; then
     log_step "creating tempestconf venv at ${venv}"
-    python3 -m venv "${venv}"
+    rm -rf "${venv}"
+    python3 -m venv --system-site-packages "${venv}"
     "${venv}/bin/pip" install --upgrade pip
     "${venv}/bin/pip" install python-tempestconf python-openstackclient
 fi
-OSC="${venv}/bin/openstack"
+if [[ -x "${venv}/bin/openstack" ]]; then
+    OSC="${venv}/bin/openstack"
+else
+    OSC="$(command -v openstack || true)"
+fi
+if [[ -z "${OSC}" ]]; then
+    log "FATAL: openstack client missing from venv and PATH"
+    exit 1
+fi
 
 # 4. Generate tempest.conf with python-tempestconf, against the live cloud.
 # discover-tempest-config talks to keystone/nova/glance/neutron via the
@@ -110,11 +131,19 @@ log_step "sizing Tempest resources for the guest image"
         "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
         "${flavor_ref}" "${flavor_ref_alt}" \
         "${TEMPEST_VOLUME_SIZE_GB:-4}" \
-        "${TEMPEST_IMAGE_SSH_USER:-ubuntu}" <<'PY'
+        "${TEMPEST_IMAGE_SSH_USER:-ubuntu}" \
+        "${TEMPEST_RUN_VALIDATION:-false}" <<'PY'
 import configparser
 import sys
 
-path, flavor_ref, flavor_ref_alt, volume_size, image_ssh_user = sys.argv[1:]
+(
+    path,
+    flavor_ref,
+    flavor_ref_alt,
+    volume_size,
+    image_ssh_user,
+    run_validation,
+) = sys.argv[1:]
 config = configparser.RawConfigParser()
 config.read(path)
 for section in ("compute", "volume", "validation"):
@@ -124,6 +153,7 @@ config.set("compute", "flavor_ref", flavor_ref)
 config.set("compute", "flavor_ref_alt", flavor_ref_alt)
 config.set("volume", "volume_size", volume_size)
 config.set("validation", "image_ssh_user", image_ssh_user)
+config.set("validation", "run_validation", run_validation)
 with open(path, "w", encoding="utf-8") as stream:
     config.write(stream)
 PY
@@ -135,23 +165,10 @@ if [[ -s "${EXCLUDE_LIST}" ]]; then
     log "exclude-list copied to ${TEMPEST_DIR}/tempest/exclude-list.txt"
 fi
 
-# 6. tox -e smoke --notest (sets up the venv but doesn't run yet). Uses
-# upstream tempest's own tox.ini.
-log_step "tox -e smoke --notest (bootstrap tempest tox venv)"
-(
-    cd "${TEMPEST_DIR}/tempest"
-    # Propagate proxy if set; the venv install pulls deps from pypi.
-    run_logged "tox -e smoke --notest" -- \
-        env -i HOME="${HOME}" PATH="${PATH}" \
-            http_proxy="${http_proxy:-}" https_proxy="${https_proxy:-}" \
-            HTTP_PROXY="${HTTP_PROXY:-}" HTTPS_PROXY="${HTTPS_PROXY:-}" \
-            NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" \
-            tox -e smoke --notest
-)
-
-# 7. Actually run smoke.
+# 6. Run smoke. Direct `tempest run` is the default because upstream tox pulls
+# OpenStack upper-constraints over HTTPS, which is often blocked by internal
+# proxies on validation hosts. Set TEMPEST_USE_TOX=1 to exercise tox explicitly.
 smoke_out="${TEMPEST_DIR}/smoke_output.txt"
-log_step "tox -e smoke (full smoke run) -> ${smoke_out}"
 rc=0
 (
     cd "${TEMPEST_DIR}/tempest"
@@ -160,17 +177,32 @@ rc=0
     else
         TEMPEST_FLAGS=""
     fi
-    # `tox -e smoke` resolves to upstream tempest's smoke env which runs
-    # tagged smoke tests. Pass extra args through TOX_TESTENV_PASSENV.
-    tox -e smoke -- ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
+    if [[ "${TEMPEST_USE_TOX:-0}" == "1" ]]; then
+        log_step "tox -e smoke --notest (bootstrap tempest tox venv)"
+        run_logged "tox -e smoke --notest" -- \
+            env -i HOME="${HOME}" PATH="${PATH}" \
+                http_proxy="${http_proxy:-}" https_proxy="${https_proxy:-}" \
+                HTTP_PROXY="${HTTP_PROXY:-}" HTTPS_PROXY="${HTTPS_PROXY:-}" \
+                NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" \
+                tox -e smoke --notest
+        log_step "tox -e smoke (full smoke run) -> ${smoke_out}"
+        tox -e smoke -- ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
+    else
+        log_step "tempest run --smoke (direct venv run) -> ${smoke_out}"
+        "${venv}/bin/tempest" run \
+            --config-file "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
+            --smoke \
+            --serial \
+            ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
+    fi
 ) || rc=$?
 
-# 8. Extract FAILED lines.
+# 7. Extract FAILED lines.
 failures="${TEMPEST_DIR}/failures.txt"
 grep -E '^FAILED|\{.*\}.*FAILED' "${smoke_out}" > "${failures}" || true
 log_step "failures: $(wc -l < "${failures}") (see ${failures})"
 
-# 9. Sidecar diagnostic dumps (zopenstack-style report/), Sunbeam-flavor.
+# 8. Sidecar diagnostic dumps (zopenstack-style report/), Sunbeam-flavor.
 log_step "writing diagnostic dumps to ${REPORT_DIR}"
 (
     # shellcheck disable=SC1090
