@@ -10,7 +10,7 @@ index 231fa5f..1424c65 100644
      # Make sure KillMode=process is set in the resulting systemd unit instead of
      # the default KillMode=control-group to avoid the situation where stopping
      # libvirtd causes the forced power off scenario for all VMs; it also affects
-@@ -969,6 +970,11 @@ hooks:
+@@ -969,6 +970,10 @@ hooks:
        - microstack-support
  
  plugs:
@@ -18,7 +18,6 @@ index 231fa5f..1424c65 100644
 +    interface: system-files
 +    read:
 +      - /etc/mdevctl.d
-+      - /etc/mdevctl.d/**
    epa-info:
      interface: content
      content: epa-info
