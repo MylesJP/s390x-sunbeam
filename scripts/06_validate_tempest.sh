@@ -7,8 +7,8 @@
 #   3. Use python-tempestconf (upstream, deployment-agnostic) to generate
 #      tempest.conf from the live cloud's catalog.
 #   4. Drop in the vendor/zopenstack/exclude-list.txt.
-#   5. `tox -e smoke --notest` to set up the venv.
-#   6. `tox -e smoke | tee smoke_output.txt` for the actual run.
+#   5. Run upstream smoke tests directly with `tempest run --smoke --serial`
+#      by default. Set TEMPEST_USE_TOX=1 to exercise upstream tox explicitly.
 #   7. Save FAILED lines into failures.txt.
 #   8. Dump diagnostic state (openstack CLI: catalog, image list, etc.) into
 #      a tempest_report/ directory.
@@ -107,13 +107,17 @@ log_step "generating tempest.conf via python-tempestconf"
     # shellcheck disable=SC1090
     source "${OPENRC}"
     cd "${TEMPEST_DIR}/tempest"
-    # Generate then drop into etc/.
-    "${venv}/bin/discover-tempest-config" \
-        --out "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
-        --debug \
-        --create \
-        --image "${TEMPEST_IMAGE_URL}" \
+    tempestconf_args=(
+        --out "${TEMPEST_DIR}/tempest/etc/tempest.conf"
+        --create
+        --image "${TEMPEST_IMAGE_URL}"
         --network-id "$("${OSC}" network show external-network -f value -c id 2>/dev/null || true)"
+    )
+    if [[ "${TEMPESTCONF_DEBUG:-0}" == "1" ]]; then
+        tempestconf_args+=(--debug)
+    fi
+    # Generate then drop into etc/.
+    "${venv}/bin/discover-tempest-config" "${tempestconf_args[@]}"
 ) 2>&1 | tee "${TEMPEST_DIR}/tempestconf.log" || \
     log "WARN: discover-tempest-config returned non-zero; check ${TEMPEST_DIR}/tempestconf.log"
 

@@ -21,12 +21,14 @@ What we **do** vendor (and may need to adapt over time):
 
 | Vendored | Purpose | Sunbeam adaptation |
 |---|---|---|
-| `exclude-list.txt` | Tempest tests known not to work | The two existing exclusions reference charmed-keystone policy quirks; whether they apply to keystone-k8s is TBD. Re-evaluate after first Sunbeam tempest run. |
+| `exclude-list.txt` | Tempest tests known not to work | Includes the zopenstack Keystone-policy exclusions plus the floating-IP reachability scenario test, which only passes when the validation host can route to `EXT_SUBNET_POOL`. |
 
 The **workflow** we borrow from zopenstack (in [`scripts/06_validate_tempest.sh`](../../scripts/06_validate_tempest.sh)):
 
-- Set up tempest tox env with `tox -e smoke --notest`, then run with
-  `tox -e smoke | tee output.txt`.
+- Run upstream smoke tests with `tempest run --smoke --serial` by default.
+  Set `TEMPEST_USE_TOX=1` to exercise `tox -e smoke`; this is optional because
+  tox fetches OpenStack upper-constraints over HTTPS and may be blocked by
+  internal validation-host proxies.
 - Grep `FAILED` lines into a single failures file.
 - Allow per-test re-runs with `tempest run --serial --regex <pattern>` (see
   [`tools/run_tempest_test.sh`](../../tools/run_tempest_test.sh)).
