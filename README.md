@@ -277,6 +277,9 @@ stall the deploy regardless of our charms.
 | `EXTERNAL_BRIDGE_ADDRESS` | unset | 03b — optional routed-provider address applied to the hypervisor's `br-ex` (for example `172.16.2.1/24` on a single-NIC nested VM) |
 | `IMAGE_URL` | Noble cloud image for `TARGET_ARCH` | 04 |
 | `SMOKE_VALIDATE_SSH` / `SMOKE_SSH_USER` | `1` / `ubuntu` | 04b — floating-IP SSH acceptance check |
+| `SMOKE_CONFIG_DRIVE` | `true` | 04b — pass Nova metadata/network data via config-drive; required for reliable s390x guest networking in the LPAR test cloud |
+| `SMOKE_SSH_INITIAL_SLEEP` / `SMOKE_SSH_ATTEMPTS` / `SMOKE_SSH_INTERVAL` | `90` / `30` / `10` | 04b — SSH proof timing after floating-IP association |
+| `TEMPEST_PLUGIN_MODE` | `upstream` | 06 — set to `distro` to install and run the distro Tempest plugin set for legacy charmed-openstack test-count parity |
 | `TEST_SHARE_NOTES_FILE` | unset | 99 — optional Markdown file appended as “Notes and known issues” in the publishable report |
 
 Phase 03 sets the Juju model constraint `arch=$TARGET_ARCH` before deploying
@@ -513,6 +516,15 @@ is meaningful. We vendor only the **exclude-list** from zopenstack (under
   resources but do not route that floating-IP range back to the runner. Remove
   this exclusion when your external network is genuinely reachable from the
   Tempest host.
+
+The default phase 06 run uses upstream Tempest in the phase venv. Legacy
+charmed-openstack reports install distro Tempest plugin packages, so they run
+more smoke-discovered tests, including plugin setup classes for services that
+are intentionally absent. To compare against that legacy count, run:
+
+```bash
+TEMPEST_PLUGIN_MODE=distro ./run.sh 06
+```
 
 ### Re-running a single test
 

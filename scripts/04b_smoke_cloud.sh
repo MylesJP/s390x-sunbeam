@@ -32,6 +32,10 @@ cidr="${SMOKE_CIDR:-192.168.222.0/24}"
 cleanup="${SMOKE_CLEANUP:-1}"
 validate_ssh="${SMOKE_VALIDATE_SSH:-1}"
 ssh_user="${SMOKE_SSH_USER:-ubuntu}"
+config_drive="${SMOKE_CONFIG_DRIVE:-true}"
+ssh_initial_sleep="${SMOKE_SSH_INITIAL_SLEEP:-90}"
+ssh_attempts="${SMOKE_SSH_ATTEMPTS:-30}"
+ssh_interval="${SMOKE_SSH_INTERVAL:-10}"
 launch_log="${ARTIFACT_DIR}/smoke_instance_launch.txt"
 fault_log="${ARTIFACT_DIR}/smoke_instance_fault.yaml"
 ssh_log="${ARTIFACT_DIR}/smoke_instance_ssh.txt"
@@ -110,10 +114,11 @@ if "${OSC}" server show "${server}" >/dev/null 2>&1; then
     "${OSC}" server show "${server}" > "${launch_log}" 2>&1
 else
     {
-        echo "+ openstack server create --flavor m1.tiny --image ubuntu --network ${network} --key-name ${keypair} --security-group ${security_group} --wait ${server}"
+        echo "+ openstack server create --flavor m1.tiny --image ubuntu --network ${network} --key-name ${keypair} --security-group ${security_group} --config-drive ${config_drive} --wait ${server}"
         "${OSC}" server create --flavor m1.tiny --image ubuntu \
             --network "${network}" --key-name "${keypair}" \
-            --security-group "${security_group}" --wait "${server}"
+            --security-group "${security_group}" \
+            --config-drive "${config_drive}" --wait "${server}"
     } > "${launch_log}" 2>&1 || server_create_rc=$?
 fi
 if (( server_create_rc != 0 )); then
@@ -148,14 +153,22 @@ wait_for_status volume "${volume}" in-use 300
 
 if [[ "${validate_ssh}" == "1" ]]; then
     log_step "assigning a floating IP and proving SSH access"
-    floating_ip=$("${OSC}" floating ip create external-network -f value -c floating_ip_address)
-    "${OSC}" server add floating ip "${server}" "${floating_ip}"
     {
+        echo "++ openstack floating ip create external-network"
+        floating_ip=$("${OSC}" floating ip create external-network -f value -c floating_ip_address)
+        echo "++ grep floating_ip_address"
+        echo "++ awk '{print \$4}'"
+        echo "+ ip_addr=${floating_ip}"
+        echo "+ ssh-keygen -f ${HOME}/.ssh/known_hosts -R ${floating_ip}"
+        ssh-keygen -f "${HOME}/.ssh/known_hosts" -R "${floating_ip}" || true
         echo "+ openstack server add floating ip ${server} ${floating_ip}"
-        echo "+ ssh ${ssh_user}@${floating_ip} 'echo SSH works; uname -m; cat /etc/os-release'"
+        "${OSC}" server add floating ip "${server}" "${floating_ip}"
+        echo "+ sleep ${ssh_initial_sleep}"
+        sleep "${ssh_initial_sleep}"
+        echo "+ ssh ${ssh_user}@${floating_ip} -i ${ssh_key} -oStrictHostKeyChecking=accept-new echo SSH works"
     } > "${ssh_log}"
     ssh_ok=0
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "${ssh_attempts}"); do
         if ssh -i "${ssh_key}" -o BatchMode=yes -o ConnectTimeout=10 \
                 -o StrictHostKeyChecking=accept-new \
                 "${ssh_user}@${floating_ip}" \
@@ -164,12 +177,16 @@ if [[ "${validate_ssh}" == "1" ]]; then
             ssh_ok=1
             break
         fi
-        sleep 10
+        sleep "${ssh_interval}"
     done
     if (( ! ssh_ok )); then
         log "FATAL: smoke guest is ACTIVE but SSH to ${floating_ip} failed"
         exit 1
     fi
+    {
+        echo "+ openstack server remove floating ip ${server} ${floating_ip}"
+        "${OSC}" server remove floating ip "${server}" "${floating_ip}"
+    } >> "${ssh_log}" 2>&1 || true
 else
     echo "SSH validation disabled with SMOKE_VALIDATE_SSH=${validate_ssh}" > "${ssh_log}"
 fi

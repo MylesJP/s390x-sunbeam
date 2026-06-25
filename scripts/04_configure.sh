@@ -81,6 +81,7 @@ log_step "creating demo resources (external network, flavors, ${ARCH} guest imag
         "${OSC}" network create --external \
             --provider-network-type flat --provider-physical-network "${EXT_PHYSNET}" \
             "${EXT_NET_NAME}"                                                 2>&1
+    "${OSC}" network set --share "${EXT_NET_NAME}"                            2>&1
     "${OSC}" subnet show external-subnet >/dev/null 2>&1 || \
         "${OSC}" subnet create --network "${EXT_NET_NAME}" \
             --subnet-range "${EXT_SUBNET_RANGE}" --no-dhcp \

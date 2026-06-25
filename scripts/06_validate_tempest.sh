@@ -9,6 +9,8 @@
 #   4. Drop in the vendor/zopenstack/exclude-list.txt.
 #   5. Run upstream smoke tests directly with `tempest run --smoke --serial`
 #      by default. Set TEMPEST_USE_TOX=1 to exercise upstream tox explicitly.
+#      Set TEMPEST_PLUGIN_MODE=distro to run the distro Tempest + plugin set
+#      used by the legacy charmed-openstack validation reports.
 #   7. Save FAILED lines into failures.txt.
 #   8. Dump diagnostic state (openstack CLI: catalog, image list, etc.) into
 #      a tempest_report/ directory.
@@ -69,6 +71,23 @@ done
 if ((${#missing_tempestconf_debs[@]})); then
     run_logged "apt install tempestconf python deps" -- \
         sudo apt-get install -y "${missing_tempestconf_debs[@]}"
+fi
+if [[ "${TEMPEST_PLUGIN_MODE:-upstream}" == "distro" ]]; then
+    run_logged "apt install distro tempest plugins" -- sudo apt-get install -y \
+        tempest \
+        barbican-tempest-plugin \
+        cinder-tempest-plugin \
+        designate-tempest-plugin \
+        glance-tempest-plugin \
+        heat-tempest-plugin \
+        ironic-tempest-plugin \
+        keystone-tempest-plugin \
+        magnum-tempest-plugin \
+        manila-tempest-plugin \
+        neutron-tempest-plugin \
+        octavia-tempest-plugin \
+        telemetry-tempest-plugin \
+        watcher-tempest-plugin
 fi
 
 # 2. Clone upstream tempest (if not already cloned).
@@ -175,29 +194,49 @@ fi
 smoke_out="${TEMPEST_DIR}/smoke_output.txt"
 rc=0
 (
-    cd "${TEMPEST_DIR}/tempest"
-    if [[ -s exclude-list.txt ]]; then
-        TEMPEST_FLAGS="--exclude-list exclude-list.txt"
-    else
-        TEMPEST_FLAGS=""
-    fi
-    if [[ "${TEMPEST_USE_TOX:-0}" == "1" ]]; then
-        log_step "tox -e smoke --notest (bootstrap tempest tox venv)"
-        run_logged "tox -e smoke --notest" -- \
-            env -i HOME="${HOME}" PATH="${PATH}" \
-                http_proxy="${http_proxy:-}" https_proxy="${https_proxy:-}" \
-                HTTP_PROXY="${HTTP_PROXY:-}" HTTPS_PROXY="${HTTPS_PROXY:-}" \
-                NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" \
-                tox -e smoke --notest
-        log_step "tox -e smoke (full smoke run) -> ${smoke_out}"
-        tox -e smoke -- ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
-    else
-        log_step "tempest run --smoke (direct venv run) -> ${smoke_out}"
-        "${venv}/bin/tempest" run \
-            --config-file "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
+    if [[ "${TEMPEST_PLUGIN_MODE:-upstream}" == "distro" ]]; then
+        distro_workspace="${TEMPEST_DIR}/distro-workspace"
+        rm -rf "${distro_workspace}"
+        /usr/bin/tempest init "${distro_workspace}"
+        cp "${TEMPEST_DIR}/tempest/etc/tempest.conf" "${distro_workspace}/etc/tempest.conf"
+        if [[ -s "${TEMPEST_DIR}/tempest/exclude-list.txt" ]]; then
+            cp "${TEMPEST_DIR}/tempest/exclude-list.txt" "${distro_workspace}/etc/exclude-list.txt"
+            TEMPEST_FLAGS="--exclude-list etc/exclude-list.txt"
+        else
+            TEMPEST_FLAGS=""
+        fi
+        cd "${distro_workspace}"
+        log_step "distro tempest run --smoke with plugins -> ${smoke_out}"
+        /usr/bin/tempest run \
+            --config-file etc/tempest.conf \
             --smoke \
             --serial \
             ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
+    else
+        cd "${TEMPEST_DIR}/tempest"
+        if [[ -s exclude-list.txt ]]; then
+            TEMPEST_FLAGS="--exclude-list exclude-list.txt"
+        else
+            TEMPEST_FLAGS=""
+        fi
+        if [[ "${TEMPEST_USE_TOX:-0}" == "1" ]]; then
+            log_step "tox -e smoke --notest (bootstrap tempest tox venv)"
+            run_logged "tox -e smoke --notest" -- \
+                env -i HOME="${HOME}" PATH="${PATH}" \
+                    http_proxy="${http_proxy:-}" https_proxy="${https_proxy:-}" \
+                    HTTP_PROXY="${HTTP_PROXY:-}" HTTPS_PROXY="${HTTPS_PROXY:-}" \
+                    NO_PROXY="${NO_PROXY:-}" no_proxy="${no_proxy:-}" \
+                    tox -e smoke --notest
+            log_step "tox -e smoke (full smoke run) -> ${smoke_out}"
+            tox -e smoke -- ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
+        else
+            log_step "tempest run --smoke (direct venv run) -> ${smoke_out}"
+            "${venv}/bin/tempest" run \
+                --config-file "${TEMPEST_DIR}/tempest/etc/tempest.conf" \
+                --smoke \
+                --serial \
+                ${TEMPEST_FLAGS} 2>&1 | tee "${smoke_out}"
+        fi
     fi
 ) || rc=$?
 
