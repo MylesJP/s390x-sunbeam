@@ -150,24 +150,84 @@ else
 fi
 
 {
-    set +x
+    echo "# Sunbeam/OpenStack provenance"
+    echo
+    echo "This file replaces the legacy charm 'openstack-origin' dump. Sunbeam"
+    echo "charms generally do not expose an 'openstack-origin' config option, so"
+    echo "the useful provenance is the selected Ubuntu/OpenStack series, Juju charm"
+    echo "channels/revisions/bases, and machine-side snap/package evidence."
+    echo
+    echo "## Validation target"
+    echo
+    echo "ubuntu-series=$(series_name)"
+    echo "openstack-series=$(openstack_series_name)"
+    echo "target-arch=$(target_arch)"
+    echo "run-id=${RUN_ID}"
+    echo "charm-source=${CHARM_SOURCE:-charmhub}"
+    echo
+    echo "## Juju applications"
+    echo
     for model in "${K8S_MODEL}" "${MACHINE_MODEL}"; do
-        apps=$(juju status -m "${CONTROLLER}:${model}" --format=json 2>/dev/null |
-            jq -r '.applications | keys[]' 2>/dev/null || true)
-        for app in ${apps}; do
-            for key in openstack-origin source channel; do
-                echo "++ juju config ${app} ${key}"
-                origin=$(juju config -m "${CONTROLLER}:${model}" "${app}" "${key}" 2>/dev/null)
-                exit_code=$?
-                print_trace_value origin "${origin}"
-                echo "+ exit_code=${exit_code}"
-                echo "+ set +x"
-                if [[ "${exit_code}" == "0" && -n "${origin}" && "${origin}" != "{}" ]]; then
-                    break
-                fi
-            done
-        done
+        echo "+ juju status -m ${CONTROLLER}:${model} --format=json"
+        juju status -m "${CONTROLLER}:${model}" --format=json 2>/dev/null |
+            jq -r --arg model "${model}" '
+                def origin:
+                    if (.["charm-origin"] | type) == "object" then .["charm-origin"] else {} end;
+                def base:
+                    if .base then ((.base.name // "-") + "@" + (.base.channel // "-"))
+                    elif origin.base then ((origin.base.name // "-") + "@" + (origin.base.channel // "-"))
+                    else "-" end;
+                (.applications // {}) | to_entries[] |
+                [
+                    $model,
+                    .key,
+                    (.value["charm-name"] // .value.charm // "-"),
+                    (.value.channel // .value["charm-channel"] // (.value | origin.channel) // "-"),
+                    ((.value["charm-rev"] // .value.revision // (.value | origin.revision) // "-") | tostring),
+                    (.value | base),
+                    (.value["application-status"].current // "-"),
+                    (.value["application-status"].message // "")
+                ] | @tsv
+            ' 2>/dev/null |
+            awk -F '\t' 'BEGIN {
+                    printf "%-10s %-22s %-28s %-14s %-8s %-12s %-10s %s\n", "MODEL", "APP", "CHARM", "CHANNEL", "REV", "BASE", "STATUS", "MESSAGE"
+                    printf "%-10s %-22s %-28s %-14s %-8s %-12s %-10s %s\n", "-----", "---", "-----", "-------", "---", "----", "------", "-------"
+                }
+                {
+                    printf "%-10s %-22s %-28s %-14s %-8s %-12s %-10s %s\n", $1, $2, $3, $4, $5, $6, $7, $8
+                }' || true
+        echo
     done
+    echo "## Machine-side snaps"
+    echo
+    echo "+ snap list juju k8s openstack-hypervisor cinder-volume microceph"
+    snap list juju k8s openstack-hypervisor cinder-volume microceph 2>&1 || true
+    echo
+    echo "## Machine-side OpenStack runtime evidence"
+    echo
+    echo "+ readlink -f /snap/openstack-hypervisor/current"
+    readlink -f /snap/openstack-hypervisor/current 2>&1 || true
+    echo
+    echo "+ zgrep -m1 '^nova (' /snap/openstack-hypervisor/current/usr/share/doc/python3-nova/changelog.Debian.gz"
+    zgrep -m1 '^nova (' /snap/openstack-hypervisor/current/usr/share/doc/python3-nova/changelog.Debian.gz 2>&1 || true
+    echo
+    echo "+ test -x /snap/openstack-hypervisor/current/usr/bin/qemu-system-s390x"
+    if test -x /snap/openstack-hypervisor/current/usr/bin/qemu-system-s390x; then
+        echo "qemu-system-s390x=present"
+    else
+        echo "qemu-system-s390x=missing"
+    fi
+    echo
+    echo "+ openstack catalog list"
+    if [[ -r "${OPENRC}" && -x "${OSC}" ]]; then
+        (
+            # shellcheck disable=SC1090
+            source "${OPENRC}"
+            "${OSC}" catalog list
+        ) 2>&1 || true
+    else
+        echo "OpenStack client/openrc unavailable; phase 04 did not complete."
+    fi
 } > "${REPORT_DIR}/openstack_origin.txt"
 
 {
