@@ -125,7 +125,7 @@ if (( server_create_rc != 0 )); then
     "${OSC}" server show "${server}" -f yaml > "${fault_log}" 2>&1 || true
     cat "${fault_log}" >> "${PHASE_LOG}" || true
     if grep -qi "does not support ACPI" "${fault_log}" "${launch_log}"; then
-        log "FATAL: Nova/libvirt emitted ACPI for an s390x guest; see LP #2043987 and rebuild openstack-hypervisor with ppa:mylesjp/nova-acpi-patch"
+        log "FATAL: Nova/libvirt emitted ACPI for an s390x guest; see LP #2043987. Rebuild openstack-hypervisor with ppa:mylesjp/nova-acpi-patch and rerun phase 03b with HYPERVISOR_SNAP_PATH=<snap> HYPERVISOR_EXPECT_NOVA_ACPI_PATCH=1."
     else
         log "FATAL: smoke-test guest create failed; see ${launch_log} and ${fault_log}"
     fi
@@ -134,7 +134,7 @@ fi
 if ! wait_for_status server "${server}" ACTIVE 600; then
     "${OSC}" server show "${server}" -f yaml 2>&1 | tee "${fault_log}" | tee -a "${PHASE_LOG}" || true
     if grep -qi "does not support ACPI" "${fault_log}" "${launch_log}"; then
-        log "FATAL: Nova/libvirt emitted ACPI for an s390x guest; see LP #2043987 and rebuild openstack-hypervisor with ppa:mylesjp/nova-acpi-patch"
+        log "FATAL: Nova/libvirt emitted ACPI for an s390x guest; see LP #2043987. Rebuild openstack-hypervisor with ppa:mylesjp/nova-acpi-patch and rerun phase 03b with HYPERVISOR_SNAP_PATH=<snap> HYPERVISOR_EXPECT_NOVA_ACPI_PATCH=1."
         exit 1
     fi
     log "FATAL: smoke-test guest did not become ACTIVE"

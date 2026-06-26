@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render Noble/s390x bundles using local charms only where needed."""
+"""Render s390x bundles using local charms only where needed."""
 
 from __future__ import annotations
 
@@ -55,6 +55,9 @@ def render_machine(source: Path, destination: Path, charm_dir: Path) -> None:
     apps = documents[0]["applications"]
 
     overrides = {
+        "sunbeam-machine": "sunbeam-machine_s390x.charm",
+        "hypervisor": "openstack-hypervisor_s390x.charm",
+        "cinder-volume": "cinder-volume_s390x.charm",
         "microceph": "microceph_s390x.charm",
         "cinder-microceph": "cinder-volume-ceph_s390x.charm",
     }

@@ -64,6 +64,14 @@ fi
 
 # 4. K8s snap services. k8sd reconciles features, while containerd performs
 # image pulls; both need the proxy.
+#
+# During the first Canonical K8s bootstrap, however, starting the snap's
+# containerd service before `k8s bootstrap` causes bootstrap preflight to fail:
+# it sees /run/containerd and assumes a conflicting runtime is already present.
+# Callers that are preparing for first bootstrap can set
+# SETUP_PROXY_RESTART_K8S=0 to install the drop-ins without starting/restarting
+# the K8s daemons.
+restart_k8s_services="${SETUP_PROXY_RESTART_K8S:-1}"
 k8s_services=(snap.k8s.k8sd.service snap.k8s.containerd.service)
 for service in "${k8s_services[@]}"; do
     if systemctl list-unit-files "${service}" 2>/dev/null | grep -q "${service}"; then
@@ -80,7 +88,11 @@ Environment="HTTPS_PROXY=${PROXY_URL}"
 Environment="NO_PROXY=${NO_PROXY_VAL}"
 EOF
             sudo systemctl daemon-reload
-            sudo systemctl restart "${service}"
+            if [[ "${restart_k8s_services}" == "1" ]]; then
+                sudo systemctl restart "${service}"
+            else
+                log "deferred ${service} restart until after k8s bootstrap"
+            fi
         fi
     else
         log "${service} not installed yet; skipping systemd drop-in"
@@ -91,7 +103,7 @@ done
 # versions a normal restart can leave the existing main process alive, so
 # verify its live environment and ask Restart=always to replace it if stale.
 containerd_service=snap.k8s.containerd.service
-if systemctl is-active --quiet "${containerd_service}"; then
+if [[ "${restart_k8s_services}" == "1" ]] && systemctl is-active --quiet "${containerd_service}"; then
     main_pid="$(systemctl show "${containerd_service}" -p MainPID --value)"
     live_no_proxy="$(
         sudo sh -c "tr '\\0' '\\n' </proc/${main_pid}/environ" 2>/dev/null \

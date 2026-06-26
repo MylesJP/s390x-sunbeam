@@ -195,6 +195,34 @@ smoke_out="${TEMPEST_DIR}/smoke_output.txt"
 rc=0
 (
     if [[ "${TEMPEST_PLUGIN_MODE:-upstream}" == "distro" ]]; then
+        # Resolute currently carries a neutron-tempest-plugin module that still
+        # calls testtools.try_import during discovery, while Resolute's
+        # testtools package no longer provides that helper. Discovery imports
+        # every plugin module before Tempest can apply an exclude-list, so keep
+        # the workaround local to this Tempest process rather than editing
+        # distro files on the validation host.
+        tempest_compat_dir="${TEMPEST_DIR}/python-compat"
+        mkdir -p "${tempest_compat_dir}"
+        cat > "${tempest_compat_dir}/sitecustomize.py" <<'PY'
+"""Small Tempest-only compatibility shims for distro plugin discovery."""
+import importlib
+
+try:
+    import testtools
+except Exception:
+    testtools = None
+
+if testtools is not None and not hasattr(testtools, "try_import"):
+    def try_import(import_str, alternative=None, error_callback=None):
+        try:
+            return importlib.import_module(import_str)
+        except ImportError as exc:
+            if error_callback is not None:
+                error_callback(exc)
+            return alternative
+
+    testtools.try_import = try_import
+PY
         distro_workspace="${TEMPEST_DIR}/distro-workspace"
         rm -rf "${distro_workspace}"
         /usr/bin/tempest init "${distro_workspace}"
@@ -207,7 +235,8 @@ rc=0
         fi
         cd "${distro_workspace}"
         log_step "distro tempest run --smoke with plugins -> ${smoke_out}"
-        /usr/bin/tempest run \
+        PYTHONPATH="${tempest_compat_dir}${PYTHONPATH:+:${PYTHONPATH}}" \
+            /usr/bin/tempest run \
             --config-file etc/tempest.conf \
             --smoke \
             --serial \

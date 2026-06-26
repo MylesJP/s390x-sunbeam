@@ -6,6 +6,7 @@ set -euo pipefail
 TARGET="${1:?usage: $0 ubuntu@LPAR_ADDRESS}"
 OUT_DIR="${SIDELOAD_DIR:-/tmp/s390x-k8s-images}"
 SKOPEO_IMAGE="${SKOPEO_IMAGE:-quay.io/skopeo/stable:latest}"
+RAWFILE_ROCK="${RAWFILE_ROCK:-}"
 
 images=(
     "registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.15.0"
@@ -38,6 +39,13 @@ done
 remote_dir="/home/ubuntu/builds/s390x-k8s-images"
 ssh "${TARGET}" "mkdir -p '${remote_dir}'"
 scp "${archives[@]}" "${TARGET}:${remote_dir}/"
+if [[ -n "${RAWFILE_ROCK}" ]]; then
+    [[ -r "${RAWFILE_ROCK}" ]] || {
+        echo "FATAL: RAWFILE_ROCK is not readable: ${RAWFILE_ROCK}" >&2
+        exit 1
+    }
+    scp "${RAWFILE_ROCK}" "${TARGET}:${remote_dir}/"
+fi
 
 for archive in "${archives[@]}"; do
     remote_archive="${remote_dir}/${archive##*/}"
@@ -46,6 +54,33 @@ for archive in "${archives[@]}"; do
           --address /run/containerd/containerd.sock \
           --namespace k8s.io images import '${remote_archive}'"
 done
+
+if [[ -n "${RAWFILE_ROCK}" ]]; then
+    remote_rock="${remote_dir}/${RAWFILE_ROCK##*/}"
+    ssh "${TARGET}" "
+        set -e
+        sudo /snap/k8s/current/bin/ctr \
+          --address /run/containerd/containerd.sock \
+          --namespace k8s.io images import '${remote_rock}'
+        # Rockcraft archives may import with an auto-generated ref such as
+        # import-2026-06-26:0.8.3. Kubernetes/containerd can still look for the
+        # original normalized ref after tagging, so keep both aliases present.
+        raw_ref=\"\$(sudo /snap/k8s/current/bin/ctr \
+          --address /run/containerd/containerd.sock \
+          --namespace k8s.io images ls \
+          | awk '/import-[0-9]{4}-[0-9]{2}-[0-9]{2}:0\\.8\\.3/ {print \$1; exit}')\"
+        if [ -n \"\${raw_ref}\" ]; then
+            sudo /snap/k8s/current/bin/ctr \
+              --address /run/containerd/containerd.sock \
+              --namespace k8s.io images tag \"\${raw_ref}\" \
+              docker.io/library/rawfile-localpv:0.8.3-s390x || true
+            sudo /snap/k8s/current/bin/ctr \
+              --address /run/containerd/containerd.sock \
+              --namespace k8s.io images tag \"\${raw_ref}\" \
+              docker.io/library/\"\${raw_ref}\" || true
+        fi
+    "
+fi
 
 ssh "${TARGET}" \
     "sudo k8s kubectl -n kube-system delete pod \

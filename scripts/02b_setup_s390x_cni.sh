@@ -42,7 +42,9 @@ if ! command -v k8s >/dev/null 2>&1; then
         exit 1
     fi
     # Re-run setup_proxy now that k8sd exists so its systemd drop-in lands.
-    "${SCRIPT_DIR}/../tools/setup_proxy.sh"
+    # Do not restart/start the K8s services yet: pre-bootstrap containerd at
+    # /run/containerd makes `k8s bootstrap` fail its conflict check.
+    SETUP_PROXY_RESTART_K8S=0 "${SCRIPT_DIR}/../tools/setup_proxy.sh"
 fi
 command -v k8s >/dev/null 2>&1 || { log "FATAL: 'k8s' CLI missing and could not be installed."; exit 1; }
 
@@ -79,6 +81,12 @@ fi
 if sudo k8s status >/dev/null 2>&1; then
     log "k8s already bootstrapped; skipping bootstrap step"
 else
+    # The snap may have auto-started containerd on install. Bootstrap talks to
+    # k8sd, so leave/start k8sd, but clear the pre-bootstrap runtime socket.
+    # Otherwise bootstrap sees /run/containerd and treats it as a conflict.
+    sudo systemctl start snap.k8s.k8sd.service >/dev/null 2>&1 || true
+    sudo systemctl stop snap.k8s.containerd.service >/dev/null 2>&1 || true
+    sudo rm -rf /run/containerd
     if ! run_logged "${bootstrap_desc}" -- sudo k8s bootstrap "${bootstrap_args[@]}"; then
         log "FATAL: k8s bootstrap failed"
         exit 1

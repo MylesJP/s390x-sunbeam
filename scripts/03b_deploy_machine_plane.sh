@@ -49,6 +49,169 @@ fi
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-3600}"
 READINESS_TIMEOUT="${READINESS_TIMEOUT:-${DEPLOY_TIMEOUT}}"
 ARCH="$(target_arch)"
+HYPERVISOR_SKIP_CEPH_SECRET_CONFIG="${HYPERVISOR_SKIP_CEPH_SECRET_CONFIG:-auto}"
+HYPERVISOR_DISABLE_SPICE="${HYPERVISOR_DISABLE_SPICE:-auto}"
+HYPERVISOR_SNAP_PATH="${HYPERVISOR_SNAP_PATH:-}"
+HYPERVISOR_EXPECT_NOVA_ACPI_PATCH="${HYPERVISOR_EXPECT_NOVA_ACPI_PATCH:-auto}"
+
+check_hypervisor_nova_acpi_patch() {
+    [[ "${ARCH}" == "s390x" ]] || return 0
+    command -v snap >/dev/null 2>&1 || return 0
+    snap list openstack-hypervisor >/dev/null 2>&1 || return 0
+
+    if [[ "${HYPERVISOR_EXPECT_NOVA_ACPI_PATCH}" == "auto" ]]; then
+        # Keep this warning-only by default: phase 04b has a hard guest-boot
+        # gate, while phase 03b is still useful for published-artifact gap
+        # discovery.
+        HYPERVISOR_EXPECT_NOVA_ACPI_PATCH=warn
+    fi
+
+    case "${HYPERVISOR_EXPECT_NOVA_ACPI_PATCH}" in
+        0|false|no) return 0 ;;
+        1|true|yes|warn) ;;
+        *) log "FATAL: HYPERVISOR_EXPECT_NOVA_ACPI_PATCH must be 0, 1, warn, or auto"; exit 2 ;;
+    esac
+
+    nova_changelog="/snap/openstack-hypervisor/current/usr/share/doc/python3-nova/changelog.Debian.gz"
+    if [[ -r "${nova_changelog}" ]] && zgrep -q 'lp2043987' "${nova_changelog}"; then
+        log "openstack-hypervisor stages Nova with LP #2043987 ACPI workaround"
+        return 0
+    fi
+
+    msg="installed openstack-hypervisor snap does not appear to stage Nova from ppa:mylesjp/nova-acpi-patch (LP #2043987). s390x guest boot may fail with unsupported ACPI."
+    if [[ "${HYPERVISOR_EXPECT_NOVA_ACPI_PATCH}" == "warn" ]]; then
+        log "WARN: ${msg}"
+    else
+        log "FATAL: ${msg}"
+        exit 1
+    fi
+}
+
+sideload_hypervisor_snap() {
+    [[ -n "${HYPERVISOR_SNAP_PATH}" ]] || return 0
+    if [[ ! -r "${HYPERVISOR_SNAP_PATH}" ]]; then
+        log "FATAL: HYPERVISOR_SNAP_PATH is set but not readable: ${HYPERVISOR_SNAP_PATH}"
+        exit 1
+    fi
+
+    log_step "installing local openstack-hypervisor snap: ${HYPERVISOR_SNAP_PATH}"
+    run_logged "snap install local openstack-hypervisor" -- \
+        sudo snap install --dangerous "${HYPERVISOR_SNAP_PATH}"
+    # Prevent snapd from replacing the validation snap with a store revision
+    # before the charm has a chance to configure it.
+    run_logged "hold openstack-hypervisor snap refreshes" -- \
+        sudo snap refresh --hold openstack-hypervisor || true
+    check_hypervisor_nova_acpi_patch
+}
+
+apply_s390x_hypervisor_runtime_workarounds() {
+    [[ "${ARCH}" == "s390x" ]] || return 0
+    command -v snap >/dev/null 2>&1 || return 0
+    if ! snap list openstack-hypervisor >/dev/null 2>&1; then
+        log "openstack-hypervisor snap is not installed yet; skipping s390x runtime workarounds for now"
+        return 0
+    fi
+
+    log_step "applying s390x openstack-hypervisor runtime workarounds"
+    check_hypervisor_nova_acpi_patch
+    run_logged "connect openstack-hypervisor:mdevctl-config" -- \
+        sudo snap connect openstack-hypervisor:mdevctl-config || true
+
+    if [[ "${HYPERVISOR_DISABLE_SPICE}" == "auto" ]]; then
+        HYPERVISOR_DISABLE_SPICE=1
+    fi
+    if [[ "${HYPERVISOR_DISABLE_SPICE}" == "1" ]]; then
+        run_logged "disable unsupported SPICE graphics for s390x QEMU" -- \
+            sudo install -d -m 0755 /var/snap/openstack-hypervisor/common/etc/nova/nova.conf.d
+        tmp_spice="$(mktemp)"
+        cat > "${tmp_spice}" <<'EOF'
+[spice]
+enabled = False
+agent_enabled = False
+EOF
+        sudo install -m 0644 "${tmp_spice}" \
+            /var/snap/openstack-hypervisor/common/etc/nova/nova.conf.d/99-s390x-no-spice.conf
+        rm -f "${tmp_spice}"
+    fi
+
+    if [[ "${HYPERVISOR_SKIP_CEPH_SECRET_CONFIG}" == "1" ]]; then
+        # The sentinel lets the snap configure before libvirt exists; after
+        # libvirt is running, seed the RBD secret explicitly so live volume
+        # attach works.
+        run_logged "define libvirt RBD secret for openstack-hypervisor" -- \
+            sudo python3 - <<'PY'
+import json
+import os
+import subprocess
+import tempfile
+
+try:
+    cfg = json.loads(subprocess.check_output(["snap", "get", "-d", "openstack-hypervisor"]))
+    compute = cfg["compute"]
+    uuid = compute["rbd-secret-uuid"]
+    key = compute["rbd-key"]
+except Exception:
+    raise SystemExit(0)
+
+user = compute.get("rbd-user", "nova")
+xml = f"""<secret ephemeral="no" private="no">
+  <uuid>{uuid}</uuid>
+  <usage type="ceph">
+    <name>client.{user} secret</name>
+  </usage>
+</secret>
+"""
+with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+    fh.write(xml)
+    path = fh.name
+try:
+    subprocess.run(
+        ["/snap/openstack-hypervisor/current/usr/bin/virsh", "-c", "qemu:///system", "secret-define", path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    subprocess.run(
+        ["/snap/openstack-hypervisor/current/usr/bin/virsh", "-c", "qemu:///system", "secret-set-value", "--secret", uuid, "--base64", key],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+finally:
+    os.unlink(path)
+PY
+    fi
+
+    run_logged "restart openstack-hypervisor libvirt/nova-compute" -- \
+        sudo snap restart openstack-hypervisor.libvirtd openstack-hypervisor.nova-compute || true
+}
+
+# Manual-provider machine units must match the host base. The default bundle is
+# Noble-oriented; on a Resolute LPAR, setting MACHINE_BASE=ubuntu@26.04 renders a
+# temporary bundle that asks Juju for 26.04 machine units instead of failing with
+# "base does not match".
+if [[ -n "${MACHINE_BASE:-}" ]]; then
+    rendered_bundle="${ARTIFACT_DIR}/$(basename "${BUNDLE}" .yaml)-${MACHINE_BASE//@/-}.yaml"
+    python3 - "${BUNDLE}" "${rendered_bundle}" "${MACHINE_BASE}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+source = Path(sys.argv[1])
+dest = Path(sys.argv[2])
+machine_base = sys.argv[3]
+docs = list(yaml.safe_load_all(source.read_text()))
+if not docs or not isinstance(docs[0], dict):
+    raise SystemExit(f"{source}: invalid bundle")
+for app in docs[0].get("applications", {}).values():
+    if isinstance(app, dict):
+        app["base"] = machine_base
+dest.write_text(yaml.safe_dump_all(docs, sort_keys=False))
+PY
+    log "rendered machine bundle with MACHINE_BASE=${MACHINE_BASE}: ${rendered_bundle}"
+    BUNDLE="${rendered_bundle}"
+fi
 
 if [[ ! -r "${BUNDLE}" ]]; then
     log "FATAL: machine bundle missing at ${BUNDLE}"
@@ -148,6 +311,28 @@ if [[ -z "${machine_id}" ]]; then
 fi
 log "bundle machine 0 will map to enrolled Juju machine ${machine_id}"
 
+# The s390x hypervisor snap can be asked to configure its Ceph libvirt secret
+# before the snap-managed libvirt socket exists. Seed the snap's documented
+# sentinel before the charm starts configuring the snap so the hook can complete
+# and Nova can settle. Keep this overridable so a newly published snap can be
+# tested without the workaround.
+if [[ "${HYPERVISOR_SKIP_CEPH_SECRET_CONFIG}" == "auto" ]]; then
+    if [[ "${ARCH}" == "s390x" ]]; then
+        HYPERVISOR_SKIP_CEPH_SECRET_CONFIG=1
+    else
+        HYPERVISOR_SKIP_CEPH_SECRET_CONFIG=0
+    fi
+fi
+if [[ "${HYPERVISOR_SKIP_CEPH_SECRET_CONFIG}" == "1" ]]; then
+    log_step "seeding openstack-hypervisor skip-ceph-secret-config sentinel"
+    run_logged "create skip-ceph-secret-config sentinel" -- \
+        sudo install -d -m 0755 /var/snap/openstack-hypervisor/common
+    run_logged "touch skip-ceph-secret-config sentinel" -- \
+        sudo touch /var/snap/openstack-hypervisor/common/skip-ceph-secret-config
+fi
+
+sideload_hypervisor_snap
+
 # 4. Deploy the machine bundle. Its saas: block consumes the control-plane offers
 #    (admin/${K8S_MODEL}.*) created in phase 03.
 log_step "deploying machine bundle (source=${CHARM_SOURCE}) into ${MACHINE_MODEL}: ${BUNDLE}"
@@ -189,6 +374,8 @@ run_logged "juju integrate cinder:storage-backend" -- \
 #    expected and captured by phase 05).
 log_step "waiting up to ${DEPLOY_TIMEOUT}s for ${MACHINE_MODEL} to settle"
 juju_wait_settle "${CONTROLLER}:${MACHINE_MODEL}" "${DEPLOY_TIMEOUT}" || true
+
+apply_s390x_hypervisor_runtime_workarounds
 
 log_step "gating both models on active workloads (timeout ${READINESS_TIMEOUT}s each)"
 readiness_rc=0

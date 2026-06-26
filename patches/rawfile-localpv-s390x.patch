@@ -34,21 +34,12 @@ index 2155767..48a7a0a 100644
      # via -r requirements.in
  pyyaml==6.0.2
 diff --git a/rockcraft.yaml b/rockcraft.yaml
-index d24cbdd..c45fc21 100644
+index d24cbdd..3c268a5 100644
 --- a/rockcraft.yaml
 +++ b/rockcraft.yaml
 @@ -27,0 +28 @@ platforms:
 +  s390x:
-@@ -51,18 +52,17 @@ parts:
-       for wheel in $CRAFT_STAGE/wheels/*.whl; do
-         echo $wheel >> $CRAFT_STAGE/wheels/wheels.txt
-       done
--  # NOTE(Hue): Inspired from https://discourse.ubuntu.com/t/build-rocks-with-ubuntu-pro-services/57578
--  openssl:
--    plugin: nil
--    stage-packages:
--      - openssl-fips-module-3 # a Pro only FIPS package for openssl
--      - openssl # now automatically selected from fips-preview
+@@ -61,8 +62,13 @@ parts:
    rawfile-deps:
      after: [btrfsutil]
      plugin: python

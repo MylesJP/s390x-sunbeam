@@ -10,18 +10,15 @@ didn't (including which snaps/OCI images have no s390x build), producing a tarba
 of artifacts whether or not the deployment fully succeeds.
 
 > **Why bundles instead of `sunbeam`?** The Sunbeam CLI couples the whole exercise
-> to snap-openstack working end-to-end on s390x — exactly the thing that isn't ready
-> — so it obscures whether the *charms themselves* work. Deploying the charms
-> directly with `juju deploy <bundle>` lets us verify the core charms and feed
-> precise per-image/per-snap arch gaps back upstream.
+> to snap-openstack working end-to-end on s390x. Deploying the charms directly
+> with `juju deploy <bundle>` lets us validate the core charm topology, isolate
+> machine-plane issues, and feed precise per-image/per-snap arch gaps back
+> upstream.
 
-> **Realistic outcome:** Canonical K8s on s390x is not officially validated, and the
-> OpenStack charm OCI images at `ghcr.io/canonical/...` plus the machine-side snaps
-> (`openstack-hypervisor`, `microceph`, `cinder-volume`) are published from pipelines
-> that do not all build z/power artifacts yet. So the headline deliverable of a run
-> is most often a precise arch-availability report (`arch_report.md`) listing exactly
-> what needs to be built before Sunbeam-on-s390x is viable. Tempest is best-effort
-> downstream of that. See [K8s s390x prerequisites](#k8s-s390x-prerequisites) below.
+> **Realistic outcome:** this workflow has completed on Noble and Resolute s390x
+> LPARs. A fresh run still depends on the selected channels publishing the needed
+> s390x charms, rocks, and snaps; missing artifacts are reported in
+> `arch_report.md`.
 
 ## What gets deployed
 
@@ -70,16 +67,20 @@ actual LPAR.
 
 ## Prerequisites
 
-- Ubuntu 24.04 LTS (Noble), on s390x or amd64, for the complete two-model
-  workflow. The K8s/control-plane tooling also runs on 26.04, but the published
-  2026.1 machine-plane charms currently select Ubuntu 24.04 bases and cannot be
-  placed directly on a Resolute manual machine.
+- Ubuntu 24.04 LTS (Noble), on s390x or amd64, for the default complete
+  two-model workflow.
+- Ubuntu 26.04 LTS (Resolute) is supported for validation, but run phase 03b
+  with `MACHINE_BASE=ubuntu@26.04` so the host-facing machine charms are placed
+  on a Resolute manual machine. This requires published or local machine charms
+  for `s390x/ubuntu/26.04`.
 - A user with passwordless `sudo` **and** key-based SSH back to the host (phase 02
   sets this up — it's needed to enrol the LPAR as a Juju manual machine).
 - Outbound internet (Snap Store, ghcr.io, docker.io, charmhub) — see "Behind a proxy".
 - ~32 GB RAM, ~200 GB disk.
 - `/dev/kvm` (s390x KVM) for Nova to actually launch instances. Phase 02 records
   whether it's present.
+- On s390x, plan for the Nova ACPI workaround described in
+  [Nova ACPI on s390x](#nova-acpi-on-s390x).
 
 ## Behind a proxy
 
@@ -271,6 +272,11 @@ stall the deploy regardless of our charms.
 | `JUJU_CONTROLLER` / `K8S_MODEL` / `MACHINE_MODEL` / `MANUAL_CLOUD` | `sunbeam-controller` / `openstack` / `machines` / `lpar-manual` | 03/03b/04/05/06 |
 | `CHARM_SOURCE` | `charmhub` | 03/03b — `charmhub`, `hybrid`, or `local` (see "Charm source") |
 | `BUNDLE` | per-phase `*-s390x.yaml` | 03/03b — explicit bundle path; overrides `CHARM_SOURCE` |
+| `MACHINE_BASE` | unset | 03b — render a temporary machine bundle with this base, e.g. `ubuntu@26.04` for Resolute manual machines |
+| `HYPERVISOR_SNAP_PATH` | unset | 03b — install this local `openstack-hypervisor` snap with `snap install --dangerous` before the machine charm configures it |
+| `HYPERVISOR_EXPECT_NOVA_ACPI_PATCH` | `auto` | 03b — on s390x, `auto`/`warn` warns if the installed hypervisor snap does not stage Nova with the LP #2043987 ACPI workaround; set `1` to fail early |
+| `HYPERVISOR_SKIP_CEPH_SECRET_CONFIG` | `auto` | 03b — seed `/var/snap/openstack-hypervisor/common/skip-ceph-secret-config` before deploy; `auto` enables it on s390x |
+| `HYPERVISOR_DISABLE_SPICE` | `auto` | 03b — write a Nova config override disabling SPICE graphics on s390x QEMU |
 | `DEPLOY_TIMEOUT` | `3600` | 03/03b settle wait |
 | `READINESS_TIMEOUT` | value of `DEPLOY_TIMEOUT` | 03b — final per-model wait for every unit workload to become active |
 | `EXT_NET_NAME` / `EXT_SUBNET_RANGE` / `EXT_SUBNET_GW` / `EXT_SUBNET_POOL` / `EXT_PHYSNET` | external-network / 172.16.2.0/24 / .1 / .50-.200 / physnet1 | 04 |
@@ -306,6 +312,40 @@ bundle machine `0` to it. Juju does not reuse IDs after failed enrolment, so
 hard-coding `0=0` can otherwise create an impossible extra machine on the
 manual provider.
 
+On s390x, phase 03b seeds `skip-ceph-secret-config` before deployment to avoid
+an early Ceph/libvirt ordering failure in the hypervisor snap. Set
+`HYPERVISOR_SKIP_CEPH_SECRET_CONFIG=0` when testing a snap that should handle
+this itself.
+
+If you need a locally built hypervisor snap, including for the Nova ACPI
+workaround, set `HYPERVISOR_SNAP_PATH` before phase 03b. The script installs
+the snap with `--dangerous`, holds refreshes, and lets the charm configure it:
+
+```bash
+HYPERVISOR_SNAP_PATH=/home/ubuntu/resolute-reuse-artifacts/snaps/openstack-hypervisor_2026.1-nova33-s390x-acpi-skip-ceph_s390x.snap \
+HYPERVISOR_EXPECT_NOVA_ACPI_PATCH=1 \
+CHARM_SOURCE=hybrid MACHINE_BASE=ubuntu@26.04 \
+./run.sh --run-id <run-id> 03b
+```
+
+For client-facing s390x validation, set `HYPERVISOR_EXPECT_NOVA_ACPI_PATCH=1`
+so the run fails before guest boot if the workaround is missing.
+
+After the machine model settles, phase 03b also applies the current s390x
+runtime fixups: connect the `mdevctl-config` plug, disable SPICE, define the
+libvirt RBD secret, and restart hypervisor services.
+
+On Resolute, run phase 03b with an explicit machine base:
+
+```bash
+CHARM_SOURCE=charmhub MACHINE_BASE=ubuntu@26.04 ./run.sh --run-id <run-id> 03b
+```
+
+This validates the host-facing machine charms against the 26.04 manual machine.
+If `juju add-machine` reports `machine is already provisioned` after a failed
+attempt, destroy the failed `machines` model and remove stale Juju machine-agent
+state before re-enrolling the LPAR.
+
 Phase 03b has two distinct gates. It first waits for Juju agents to finish
 hooks, then requires every unit in both the `machines` and `openstack` models
 to report an active workload. An idle agent with a blocked, waiting, or error
@@ -333,12 +373,28 @@ minimum-version check. Apply
 `patches/openstack-hypervisor-qemu-s390x-target.patch` when building the local
 s390x snap.
 
-The first guest boot can also fail with
-`machine type 's390-ccw-virtio-*' does not support ACPI`. This is the Nova
-s390x ACPI bug tracked as LP #2043987. For local validation builds, apply
-`patches/openstack-hypervisor-nova-acpi-ppa.patch` so the hypervisor snap stages
-Nova from `ppa:mylesjp/nova-acpi-patch`; then confirm the snapcraft build log or
-`apt-cache policy python3-nova` inside the build environment selects that PPA.
+### Nova ACPI on s390x
+
+The first guest boot can fail with:
+
+```text
+machine type 's390-ccw-virtio-*' does not support ACPI
+```
+
+This is the Nova s390x ACPI bug tracked as LP #2043987. Treat it as a manual
+s390x requirement unless the selected `openstack-hypervisor` snap is known to
+stage a Nova build with the workaround.
+
+For local validation builds, use
+`patches/openstack-hypervisor-nova-acpi-ppa.patch` so the snap stages Nova from
+`ppa:mylesjp/nova-acpi-patch`. Verify the installed snap with:
+
+```bash
+zgrep -m1 '^nova (' /snap/openstack-hypervisor/current/usr/share/doc/python3-nova/changelog.Debian.gz
+```
+
+Phase 03b warns by default if the patched Nova is missing; set
+`HYPERVISOR_EXPECT_NOVA_ACPI_PATCH=1` to make that a hard failure.
 
 The first s390x `cinder-volume` snap retained an app-level
 `x86_64-linux-gnu/ceph` library path, so its bundled `rados` and `rbd` Python
@@ -446,10 +502,10 @@ sudo lxd init --auto
 ```
 
 The patch carried in `patches/rawfile-localpv-s390x.patch` adds the s390x
-platform, removes the Ubuntu Pro-only FIPS staging part, and makes `grpcio`
-use Ubuntu's OpenSSL. Its bundled BoringSSL otherwise fails with `Unknown
-target CPU` on s390x. The generated protobuf modules are committed upstream,
-so the runtime image does not need `grpcio-tools`.
+platform and makes `grpcio` use Ubuntu's OpenSSL. Its bundled BoringSSL
+otherwise fails with `Unknown target CPU` on s390x. The generated protobuf
+modules are committed upstream, so the runtime image does not need
+`grpcio-tools`.
 
 When Canonical K8s is already running, the helper also imports the resulting
 `.rock` through `/run/containerd/containerd.sock` and tags it as
@@ -525,6 +581,14 @@ are intentionally absent. To compare against that legacy count, run:
 ```bash
 TEMPEST_PLUGIN_MODE=distro ./run.sh 06
 ```
+
+On Resolute, distro Tempest currently needs a narrow Python compatibility shim:
+`neutron-tempest-plugin` still imports `testtools.try_import` during discovery,
+but Resolute's `testtools` package no longer provides that helper. Phase 06 writes
+a temporary `sitecustomize.py` under the run's Tempest artifact directory and
+adds it only to the `TEMPEST_PLUGIN_MODE=distro` process. This avoids modifying
+system packages and lets unavailable-service plugin classes be discovered and
+reported as skips, matching the legacy report style.
 
 ### Re-running a single test
 
