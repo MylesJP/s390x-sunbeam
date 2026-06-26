@@ -156,6 +156,7 @@ fi
     echo "charms generally do not expose an 'openstack-origin' config option, so"
     echo "the useful provenance is the selected Ubuntu/OpenStack series, Juju charm"
     echo "channels/revisions/bases, and machine-side snap/package evidence."
+    echo "Operational status is intentionally left to juju_status.txt."
     echo
     echo "## Validation target"
     echo
@@ -165,7 +166,7 @@ fi
     echo "run-id=${RUN_ID}"
     echo "charm-source=${CHARM_SOURCE:-charmhub}"
     echo
-    echo "## Juju applications"
+    echo "## Juju charm revisions"
     echo
     for model in "${K8S_MODEL}" "${MACHINE_MODEL}"; do
         echo "+ juju status -m ${CONTROLLER}:${model} --format=json"
@@ -184,17 +185,15 @@ fi
                     (.value["charm-name"] // .value.charm // "-"),
                     (.value.channel // .value["charm-channel"] // (.value | origin.channel) // "-"),
                     ((.value["charm-rev"] // .value.revision // (.value | origin.revision) // "-") | tostring),
-                    (.value | base),
-                    (.value["application-status"].current // "-"),
-                    (.value["application-status"].message // "")
+                    (.value | base)
                 ] | @tsv
             ' 2>/dev/null |
             awk -F '\t' 'BEGIN {
-                    printf "%-10s %-22s %-28s %-14s %-8s %-12s %-10s %s\n", "MODEL", "APP", "CHARM", "CHANNEL", "REV", "BASE", "STATUS", "MESSAGE"
-                    printf "%-10s %-22s %-28s %-14s %-8s %-12s %-10s %s\n", "-----", "---", "-----", "-------", "---", "----", "------", "-------"
+                    printf "%-10s %-22s %-28s %-14s %-8s %-12s\n", "MODEL", "APP", "CHARM", "CHANNEL", "REV", "BASE"
+                    printf "%-10s %-22s %-28s %-14s %-8s %-12s\n", "-----", "---", "-----", "-------", "---", "----"
                 }
                 {
-                    printf "%-10s %-22s %-28s %-14s %-8s %-12s %-10s %s\n", $1, $2, $3, $4, $5, $6, $7, $8
+                    printf "%-10s %-22s %-28s %-14s %-8s %-12s\n", $1, $2, $3, $4, $5, $6
                 }' || true
         echo
     done
@@ -216,17 +215,6 @@ fi
         echo "qemu-system-s390x=present"
     else
         echo "qemu-system-s390x=missing"
-    fi
-    echo
-    echo "+ openstack catalog list"
-    if [[ -r "${OPENRC}" && -x "${OSC}" ]]; then
-        (
-            # shellcheck disable=SC1090
-            source "${OPENRC}"
-            "${OSC}" catalog list
-        ) 2>&1 || true
-    else
-        echo "OpenStack client/openrc unavailable; phase 04 did not complete."
     fi
 } > "${REPORT_DIR}/openstack_origin.txt"
 
